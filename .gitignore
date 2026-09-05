@@ -9,3 +9,5 @@ data/cache/
 data/custom/*
 !data/custom/README.md
 !data/custom/SOURCES.md
+!data/custom/GC_F.csv
+!data/custom/SI_F.csv

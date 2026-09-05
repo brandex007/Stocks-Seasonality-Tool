@@ -143,3 +143,24 @@ def test_a_failing_stooq_probe_is_not_retried_every_rerun(monkeypatch, tmp_path)
         data_lib.load_history("GC=F", source="auto", force_refresh=True)
     assert attempts == ["xauusd"]             # one attempt, then a cooldown
     data_lib._FAILED.clear()
+
+
+def test_fallback_reason_is_reported(monkeypatch, tmp_path):
+    """When Stooq fails, say so instead of silently serving the short series."""
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
+    data_lib.reset_failures()
+    idx = pd.bdate_range("2000-08-30", periods=500)
+    monkeypatch.setattr(data_lib, "download", lambda t: pd.DataFrame({"close": range(500)}, index=idx))
+
+    def refuse(symbol, **kw):
+        raise DataError(f"Stooq returned no data for '{symbol}': Exceeded the daily hits limit")
+
+    monkeypatch.setattr(data_lib, "download_stooq", refuse)
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "yahoo"
+    assert "daily hits limit" in df.attrs["fallback_reason"]
+
+    # the cooldown is visible too, rather than looking like success
+    again = data_lib.load_history("GC=F", source="auto", force_refresh=True)
+    assert "failed recently" in again.attrs["fallback_reason"]
+    data_lib.reset_failures()

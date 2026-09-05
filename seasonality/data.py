@@ -271,6 +271,11 @@ def _note_failure(symbol: str) -> None:
     _FAILED[symbol] = time.time()
 
 
+def reset_failures() -> None:
+    """Forget the Stooq cooldown — used by the app's refresh button."""
+    _FAILED.clear()
+
+
 def _tag(df: pd.DataFrame, source: str, symbol: str) -> pd.DataFrame:
     df = df.copy()
     df.attrs["source"] = source
@@ -322,14 +327,19 @@ def load_history(
     # where Yahoo is short. Guessing "aapl.us" for every equity would double the
     # requests to gain nothing.
     s_df = None
-    if alt and ticker.upper() in STOOQ_MAP and not _recently_failed(alt):
-        s_df, s_err = _cached_or_download(
-            ticker, "stooq",
-            lambda: download_stooq(alt, timeout=8.0),
-            force_refresh, max_age_hours,
-        )
-        if s_df is None and s_err is not None:
-            _note_failure(alt)
+    s_note = ""
+    if alt and ticker.upper() in STOOQ_MAP:
+        if _recently_failed(alt):
+            s_note = f"Stooq probe for '{alt}' failed recently; retrying later."
+        else:
+            s_df, s_err = _cached_or_download(
+                ticker, "stooq",
+                lambda: download_stooq(alt, timeout=8.0),
+                force_refresh, max_age_hours,
+            )
+            if s_df is None and s_err is not None:
+                _note_failure(alt)
+                s_note = str(s_err)
     # an empty frame is no data, whatever produced it
     y_df = None if (y_df is not None and y_df.empty) else y_df
     s_df = None if (s_df is not None and s_df.empty) else s_df
@@ -339,7 +349,12 @@ def load_history(
     if y_df is None:
         return _tag(s_df, "stooq", alt)
     if s_df is None:
-        return _tag(y_df, "yahoo", ticker)
+        out = _tag(y_df, "yahoo", ticker)
+        if s_note:
+            # say why the longer series isn't on screen instead of silently
+            # serving the short one
+            out.attrs["fallback_reason"] = s_note
+        return out
 
     earlier_by = (y_df.index[0] - s_df.index[0]).days
     if earlier_by > 365 and len(s_df) > 250:

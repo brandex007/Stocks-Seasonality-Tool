@@ -61,6 +61,7 @@ refresh = st.sidebar.button("↻ Refresh price data", width="stretch")
 if refresh:
     st.cache_data.clear()
     data_lib.clear_cache(ticker)
+    data_lib.reset_failures()
 
 st.sidebar.subheader("Window")
 window_mode = st.sidebar.radio(
@@ -94,6 +95,9 @@ st.sidebar.caption(
     f"{data_lib.source_label(hist)}  \n"
     f"{close.index[0]:%Y-%m-%d} → {close.index[-1]:%Y-%m-%d} · {len(close):,} days"
 )
+fallback = hist.attrs.get("fallback_reason")
+if fallback:
+    st.sidebar.caption(f"⚠︎ {fallback}")
 
 st.sidebar.subheader("Years")
 yr_start, yr_end = st.sidebar.slider(

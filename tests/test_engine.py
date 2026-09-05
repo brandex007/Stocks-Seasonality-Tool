@@ -176,3 +176,16 @@ def test_all_years_line_survives_without_a_filter():
     res = compute_seasonality(synthetic_close(), "TEST", 7, 6, phases=None)
     fig = build_figure(res, show_all_years=False)
     assert "All years" in [t.name for t in fig.data if t.name]
+
+
+def test_title_is_never_none():
+    """Streamlit wraps layout.title.text in <b>...</b> on the frontend, so a
+    missing title renders as a bold 'undefined' above the chart."""
+    from seasonality.chart import build_figure
+
+    res = compute_seasonality(synthetic_close(), "TEST", 7, 6)
+    untitled = build_figure(res)
+    assert untitled.layout.title.text == ""
+
+    titled = build_figure(res, title="VIX", subtitle="1990–2025")
+    assert "VIX" in titled.layout.title.text

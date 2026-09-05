@@ -175,7 +175,9 @@ fig = chart_lib.build_figure(
     today=today,
     day_ticks=day_ticks,
 )
-st.plotly_chart(fig, width="stretch")
+# theme=None: the figure carries its own styling, and Streamlit's plotly theme
+# rewrites the title on the frontend (a missing one becomes a bold "undefined").
+st.plotly_chart(fig, width="stretch", theme=None)
 
 # --------------------------------------------------------------------- detail tabs
 

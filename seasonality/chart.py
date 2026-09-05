@@ -179,12 +179,16 @@ def build_figure(
                 xanchor="left", xshift=4, font=dict(size=11, color="#2E7D32"),
             )
 
-    layout_title = None
+    # Never leave the title unset: Streamlit's plotly theme wraps the title in
+    # <b>${String(layout.title.text)}</b> on the frontend, so a missing title
+    # renders as a bold "undefined" above the chart. An empty string wraps to
+    # nothing.
+    layout_title = dict(text="", x=0.01, xanchor="left", font=dict(size=20, color=INK))
     if title:
         text = f"<b>{title}</b>"
         if subtitle:
             text += f"<br><span style='font-size:13px;color:{MUTED}'>{subtitle}</span>"
-        layout_title = dict(text=text, x=0.01, xanchor="left", font=dict(size=20, color=INK))
+        layout_title["text"] = text
 
     fig.update_layout(
         title=layout_title,

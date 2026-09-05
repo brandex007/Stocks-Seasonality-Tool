@@ -99,6 +99,7 @@ chart.build_figure(res).write_html("chart.html")
 ```
 app.py                  Streamlit UI
 export_chart.py         CLI export
+check_sources.py        report which source and history each asset resolves to
 DEPLOY.md               free hosting options (Streamlit Cloud, Render, Cloud Run)
 Dockerfile              container image for Render / Cloud Run / local docker
 .streamlit/config.toml  theme + server defaults
@@ -136,6 +137,11 @@ seasonality that difference is immaterial, but the sidebar always names the sour
 and symbol on screen so you know what you're looking at. Stooq rate-limits
 aggressive use; a failed probe is remembered for ten minutes rather than retried
 on every rerun, and Auto quietly falls back to Yahoo.
+
+Stooq symbols are mapped by convention and can only be confirmed against the live
+endpoint. `python check_sources.py` prints what each asset actually resolves to —
+a commodity still showing a Yahoo start around 2000 needs its symbol corrected in
+`STOOQ_MAP`.
 
 Seasonal averages describe past tendencies with wide dispersion around them; the
 percentile band and per-year table are there to make that dispersion visible. Not

@@ -121,3 +121,4 @@ progress) are excluded from the composites — the live year is drawn separately
 Seasonal averages describe past tendencies with wide dispersion around them; the
 percentile band and per-year table are there to make that dispersion visible. Not
 investment advice.
+# Stocks-Seasonality-Tool

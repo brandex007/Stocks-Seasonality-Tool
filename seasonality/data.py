@@ -5,18 +5,25 @@ Two sources:
 * **Yahoo Finance** (via yfinance) — everything, but its continuous futures
   series are short. ``GC=F`` starts in 2000, ``CL=F`` in 2000, and so on, which
   leaves only five or six midterm years to average.
-* **Stooq** — free daily CSVs whose commodity and index histories reach much
-  further back (spot gold as ``xauusd``, for instance).
+* **FRED** (St. Louis Fed) — a documented free CSV API with the long daily
+  benchmark series: LBMA gold and silver from 1968, WTI from 1986, Brent from
+  1987, Henry Hub gas from 1997.
 
-``load_history(..., source="auto")`` fetches both where a Stooq equivalent is
+``load_history(..., source="auto")`` fetches both where a FRED equivalent is
 known and keeps whichever starts earlier, so commodities get their full history
 without the caller having to think about it. Both are cached per source under
 ``data/cache/``.
 
-Note that a Stooq series is not always the same instrument as its Yahoo
-counterpart — spot gold rather than the front futures contract, say. For
-seasonality that is fine, but the source and symbol actually used are reported
-in ``df.attrs`` so the UI can say which one is on screen.
+Some FRED benchmarks were discontinued (the LBMA gold and silver fixings ended in
+2023), so a long FRED history is spliced onto the current Yahoo series: the two
+are ratio-matched over their overlap, which keeps the shape of every year intact
+while ending on today's price. A FRED series is also not always the same
+instrument as its Yahoo counterpart — the London fix rather than the front COMEX
+contract — so the source, symbol and any splice are reported in ``df.attrs`` for
+the UI to display.
+
+Stooq used to fill this role. It now gates its CSV endpoint behind a JavaScript
+proof-of-work bot challenge, so it is no longer usable from a script.
 """
 
 from __future__ import annotations
@@ -32,55 +39,28 @@ import pandas as pd
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
 
-STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}&i=d"
-_STOOQ_UA = "Mozilla/5.0 (compatible; seasonality-explorer/1.0)"
+FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
+_UA = "Mozilla/5.0 (compatible; seasonality-explorer/1.0)"
 
-#: Yahoo symbol -> Stooq symbol, for series where Stooq reaches further back.
+#: Yahoo symbol -> FRED series id, for daily series that reach further back.
 #: Commodities are the main reason this exists: every Yahoo ``=F`` continuous
-#: contract starts around 2000.
-STOOQ_MAP: dict[str, str] = {
-    # metals
-    "GC=F": "xauusd",   # spot gold
-    "SI=F": "xagusd",   # spot silver
-    "PL=F": "xptusd",
-    "PA=F": "xpdusd",
-    "HG=F": "hg.f",
-    "ALI=F": "ali.f",
-    # energy
-    "CL=F": "cl.f",     # WTI
-    "BZ=F": "cb.f",     # Brent
-    "NG=F": "ng.f",
-    "RB=F": "rb.f",
-    "HO=F": "ho.f",
-    # grains & softs
-    "ZC=F": "zc.f",     # corn
-    "ZW=F": "zw.f",     # wheat
-    "ZS=F": "zs.f",     # soybeans
-    "ZL=F": "zl.f",
-    "ZM=F": "zm.f",
-    "KC=F": "kc.f",     # coffee
-    "SB=F": "sb.f",     # sugar
-    "CC=F": "cc.f",     # cocoa
-    "CT=F": "ct.f",     # cotton
-    "LE=F": "le.f",     # live cattle
-    "HE=F": "he.f",     # lean hogs
-    # indices
-    "^GSPC": "^spx",
-    "^DJI": "^dji",
-    "^IXIC": "^ndq",
-    "^NDX": "^ndx",
-    "^RUT": "^rut",
-    "^VIX": "^vix",
-    "^N225": "^nkx",
-    "^GDAXI": "^dax",
-    "^FTSE": "^ukx",
-    # fx
-    "EURUSD=X": "eurusd",
-    "USDJPY=X": "usdjpy",
-    "GBPUSD=X": "gbpusd",
+#: contract starts around 2000. Series marked "ended" are spliced onto Yahoo.
+FRED_MAP: dict[str, str] = {
+    "GC=F": "GOLDAMGBD228NLBM",   # LBMA gold AM fix, 1968-  (ended 2023)
+    "SI=F": "SLVPRUSD",           # LBMA silver,      1968-  (ended 2023)
+    "CL=F": "DCOILWTICO",         # WTI spot,         1986-
+    "BZ=F": "DCOILBRENTEU",       # Brent spot,       1987-
+    "NG=F": "DHHNGSP",            # Henry Hub gas,    1997-
+    "^VIX": "VIXCLS",             # VIX,              1990-
+    "^TNX": "DGS10",              # US 10y yield,     1962-
+    "EURUSD=X": "DEXUSEU",        # 1999-
+    "USDJPY=X": "DEXJPUS",        # 1971-
+    "GBPUSD=X": "DEXUSUK",        # 1971-
 }
 
-SOURCES = ("auto", "yahoo", "stooq")
+MIN_SPLICE_OVERLAP = 20  # trading days needed to ratio-match two series
+
+SOURCES = ("auto", "yahoo", "fred")
 
 
 class DataError(RuntimeError):
@@ -102,25 +82,13 @@ def _cache_file(ticker: str, source: str = "yahoo") -> Path:
         return CACHE_DIR / f"{stem}.csv"
 
 
-def stooq_symbol(ticker: str) -> str | None:
-    """Best-guess Stooq symbol for a Yahoo ticker, or None if there isn't one."""
-    t = ticker.strip()
-    if not t:
-        return None
-    mapped = STOOQ_MAP.get(t.upper())
-    if mapped:
-        return mapped
-    if t.startswith("^"):
-        return t.lower()
-    if t.upper().endswith("-USD"):                       # BTC-USD -> btcusd
-        return t.lower().replace("-", "")
-    if t.upper().endswith("=X"):                         # EURUSD=X -> eurusd
-        return t[:-2].lower()
-    if t.endswith("=F"):
-        return None                                      # unmapped future: no guess
-    if re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,9}", t):     # US equity / ETF
-        return f"{t.lower()}.us"
-    return None
+def fred_series(ticker: str) -> str | None:
+    """FRED series id for a Yahoo ticker, or None if there isn't one.
+
+    Deliberately a lookup rather than a guess: FRED ids bear no relation to
+    exchange tickers, and inventing one would just cost a failed request.
+    """
+    return FRED_MAP.get(ticker.strip().upper()) or None
 
 
 def _read_cache(path: Path) -> pd.DataFrame | None:
@@ -203,38 +171,77 @@ def download(ticker: str) -> pd.DataFrame:
     return _flatten(raw, ticker)
 
 
-def parse_stooq_csv(text: str, symbol: str) -> pd.DataFrame:
-    """Parse Stooq's daily CSV into the same shape as :func:`_flatten`."""
-    head = text.lstrip()[:200].lower()
-    if not head.startswith("date"):
-        # Stooq answers with plain text on a bad symbol or a throttled request
-        snippet = " ".join(text.split())[:120] or "empty response"
-        raise DataError(f"Stooq returned no data for '{symbol}': {snippet}")
+def parse_fred_csv(text: str, series: str) -> pd.DataFrame:
+    """Parse a FRED CSV into a close-only frame.
+
+    FRED writes missing observations as ``.`` and has used both ``DATE`` and
+    ``observation_date`` for the first column over the years.
+    """
+    stripped = text.lstrip()
+    if not stripped[:1].isalpha() or "," not in stripped[:200]:
+        snippet = " ".join(text.split())[:140] or "empty response"
+        raise DataError(f"FRED returned no data for '{series}': {snippet}")
 
     df = pd.read_csv(io.StringIO(text))
     df.columns = [str(c).strip().lower() for c in df.columns]
-    if "date" not in df.columns or "close" not in df.columns:
-        raise DataError(f"Unexpected Stooq columns for '{symbol}': {list(df.columns)}")
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date", "close"]).set_index("date").sort_index()
-    keep = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
-    df = df[keep]
-    df = df[~df.index.duplicated(keep="last")]
-    if df.empty:
-        raise DataError(f"Stooq returned an empty series for '{symbol}'.")
-    return df
+    date_col = next((c for c in ("observation_date", "date") if c in df.columns), None)
+    value_col = next((c for c in df.columns if c != date_col), None)
+    if date_col is None or value_col is None:
+        raise DataError(f"Unexpected FRED columns for '{series}': {list(df.columns)}")
+
+    out = pd.DataFrame(
+        # .to_numpy(): passing the Series itself would align on its RangeIndex
+        # against the DatetimeIndex and leave every value NaN
+        {"close": pd.to_numeric(df[value_col], errors="coerce").to_numpy()},  # "." -> NaN
+        index=pd.to_datetime(df[date_col], errors="coerce"),
+    )
+    out = out[out.index.notna()].dropna().sort_index()
+    out = out[~out.index.duplicated(keep="last")]
+    if out.empty:
+        raise DataError(f"FRED returned an empty series for '{series}'.")
+    return out
 
 
-def download_stooq(symbol: str, timeout: float = 20.0) -> pd.DataFrame:
-    """Download a full daily history from Stooq."""
-    url = STOOQ_URL.format(symbol=symbol)
-    req = urllib.request.Request(url, headers={"User-Agent": _STOOQ_UA})
+def download_fred(series: str, timeout: float = 20.0) -> pd.DataFrame:
+    """Download a full daily history from FRED."""
+    url = FRED_URL.format(series=series)
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             text = resp.read().decode("utf-8", errors="replace")
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        raise DataError(f"Stooq request failed for '{symbol}': {exc}") from exc
-    return parse_stooq_csv(text, symbol)
+        raise DataError(f"FRED request failed for '{series}': {exc}") from exc
+    return parse_fred_csv(text, series)
+
+
+def splice(old: pd.DataFrame, new: pd.DataFrame) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    """Chain a discontinued long history onto the current series.
+
+    The LBMA gold and silver fixings ended in 2023, so their FRED history has to
+    be joined to Yahoo's to reach today. The old series is scaled by the median
+    price ratio over the overlap — a level shift only, so every year's *shape*,
+    which is all seasonality cares about, is untouched. Returns the combined
+    close-only frame and the join date (None when no splice happened).
+    """
+    overlap = old.index.intersection(new.index)
+    if len(overlap) < MIN_SPLICE_OVERLAP:
+        return new, None
+
+    tail = overlap[-min(len(overlap), 60):]
+    ratios = (new.loc[tail, "close"] / old.loc[tail, "close"]).replace(
+        [float("inf"), float("-inf")], pd.NA
+    ).dropna()
+    if ratios.empty:
+        return new, None
+    ratio = float(ratios.median())
+    if not (ratio > 0) or not pd.notna(ratio):
+        return new, None
+
+    join = overlap[-1]
+    head = old.loc[old.index < join, ["close"]] * ratio
+    combined = pd.concat([head, new.loc[new.index >= join, ["close"]]])
+    combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+    return combined, join
 
 
 def _cached_or_download(ticker: str, source: str, fetch, force_refresh: bool,
@@ -291,11 +298,12 @@ def load_history(
 ) -> pd.DataFrame:
     """Return cached daily history for ``ticker``, refreshing when stale.
 
-    ``source`` is ``"yahoo"``, ``"stooq"`` or ``"auto"``. Auto asks Yahoo first
-    and, when a Stooq equivalent is known, keeps whichever series starts earlier
-    — which is how commodities get history before 2000. The source and symbol
-    actually used are recorded in ``df.attrs``. Falls back to the cached copy
-    when the network is unavailable.
+    ``source`` is ``"yahoo"``, ``"fred"`` or ``"auto"``. Auto asks Yahoo first
+    and, when a FRED equivalent is known, keeps whichever series starts earlier —
+    splicing the two when the FRED benchmark has since been discontinued. That is
+    how commodities get history before 2000. The source, symbol and any splice
+    date are recorded in ``df.attrs``. Falls back to the cached copy when the
+    network is unavailable.
     """
     ticker = ticker.strip()
     if not ticker:
@@ -303,17 +311,17 @@ def load_history(
     if source not in SOURCES:
         raise DataError(f"Unknown source '{source}'. Use one of {SOURCES}.")
 
-    alt = stooq_symbol(ticker)
+    series = fred_series(ticker)
 
-    if source == "stooq":
-        if not alt:
-            raise DataError(f"No Stooq symbol is known for '{ticker}'.")
+    if source == "fred":
+        if not series:
+            raise DataError(f"No FRED series is known for '{ticker}'.")
         df, err = _cached_or_download(
-            ticker, "stooq", lambda: download_stooq(alt), force_refresh, max_age_hours
+            ticker, "fred", lambda: download_fred(series), force_refresh, max_age_hours
         )
         if df is None:
-            raise err or DataError(f"No Stooq data for '{ticker}'.")
-        return _tag(df, "stooq", alt)
+            raise err or DataError(f"No FRED data for '{ticker}'.")
+        return _tag(df, "fred", series)
 
     y_df, y_err = _cached_or_download(
         ticker, "yahoo", lambda: download(ticker), force_refresh, max_age_hours
@@ -323,51 +331,77 @@ def load_history(
             raise y_err or DataError(f"No data for '{ticker}'.")
         return _tag(y_df, "yahoo", ticker)
 
-    # Auto only probes Stooq for curated symbols — the commodities and indices
-    # where Yahoo is short. Guessing "aapl.us" for every equity would double the
-    # requests to gain nothing.
-    s_df = None
-    s_note = ""
-    if alt and ticker.upper() in STOOQ_MAP:
-        if _recently_failed(alt):
-            s_note = f"Stooq probe for '{alt}' failed recently; retrying later."
+    # Auto only asks FRED for the mapped symbols — the commodities, rates and FX
+    # where Yahoo is short. Everything else would just cost a failed request.
+    f_df = None
+    note = ""
+    if series:
+        if _recently_failed(series):
+            note = f"FRED probe for '{series}' failed recently; retrying later."
         else:
-            s_df, s_err = _cached_or_download(
-                ticker, "stooq",
-                lambda: download_stooq(alt, timeout=8.0),
+            f_df, f_err = _cached_or_download(
+                ticker, "fred",
+                lambda: download_fred(series, timeout=8.0),
                 force_refresh, max_age_hours,
             )
-            if s_df is None and s_err is not None:
-                _note_failure(alt)
-                s_note = str(s_err)
+            if f_df is None and f_err is not None:
+                _note_failure(series)
+                note = str(f_err)
+
     # an empty frame is no data, whatever produced it
     y_df = None if (y_df is not None and y_df.empty) else y_df
-    s_df = None if (s_df is not None and s_df.empty) else s_df
+    f_df = None if (f_df is not None and f_df.empty) else f_df
 
-    if y_df is None and s_df is None:
+    if y_df is None and f_df is None:
         raise y_err or DataError(f"No data for '{ticker}'.")
     if y_df is None:
-        return _tag(s_df, "stooq", alt)
-    if s_df is None:
+        return _tag(f_df, "fred", series)
+    if f_df is None:
         out = _tag(y_df, "yahoo", ticker)
-        if s_note:
+        if note:
             # say why the longer series isn't on screen instead of silently
             # serving the short one
-            out.attrs["fallback_reason"] = s_note
+            out.attrs["fallback_reason"] = note
         return out
 
-    earlier_by = (y_df.index[0] - s_df.index[0]).days
-    if earlier_by > 365 and len(s_df) > 250:
-        return _tag(s_df, "stooq", alt)
-    return _tag(y_df, "yahoo", ticker)
+    earlier_by = (y_df.index[0] - f_df.index[0]).days
+    if earlier_by <= 365 or len(f_df) < 250:
+        return _tag(y_df, "yahoo", ticker)
+
+    # FRED starts earlier. If it also runs to today, use it as-is; if the
+    # benchmark was discontinued, splice Yahoo onto the end.
+    stale_days = (y_df.index[-1] - f_df.index[-1]).days
+    if stale_days <= 7:
+        return _tag(f_df, "fred", series)
+
+    combined, join = splice(f_df, y_df)
+    if join is None:
+        # no usable overlap: the longer series alone beats a bad join
+        out = _tag(f_df, "fred", series)
+        out.attrs["fallback_reason"] = (
+            f"'{series}' ends {f_df.index[-1]:%Y-%m-%d} and does not overlap "
+            f"{ticker}; showing the FRED series alone."
+        )
+        return out
+    out = _tag(combined, "fred+yahoo", f"{series} → {ticker}")
+    out.attrs["spliced_at"] = join
+    return out
 
 
 def source_label(df: pd.DataFrame) -> str:
-    """Human-readable 'Stooq · xauusd' style label for a loaded history."""
+    """Human-readable 'FRED · DCOILWTICO' style label for a loaded history."""
     src = df.attrs.get("source", "yahoo")
     sym = df.attrs.get("symbol", "")
-    name = {"yahoo": "Yahoo Finance", "stooq": "Stooq"}.get(src, src)
-    return f"{name} · {sym}" if sym else name
+    name = {
+        "yahoo": "Yahoo Finance",
+        "fred": "FRED",
+        "fred+yahoo": "FRED spliced to Yahoo",
+    }.get(src, src)
+    label = f"{name} · {sym}" if sym else name
+    join = df.attrs.get("spliced_at")
+    if join is not None:
+        label += f" (joined {join:%Y-%m-%d})"
+    return label
 
 
 def cache_info(ticker: str, source: str = "yahoo") -> dict:
@@ -386,7 +420,7 @@ def clear_cache(ticker: str | None = None) -> int:
     if not CACHE_DIR.exists():
         return 0
     if ticker:
-        targets = [_cache_file(ticker, s) for s in ("yahoo", "stooq")]
+        targets = [_cache_file(ticker, s) for s in ("yahoo", "fred")]
     else:
         targets = list(CACHE_DIR.iterdir())
     n = 0

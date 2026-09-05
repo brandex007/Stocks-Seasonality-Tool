@@ -54,7 +54,7 @@ full year). Turn the day ticks off in the sidebar for month names only.
 ## Controls
 
 - **Asset** — preset lists by category, or type any Yahoo ticker (`NVDA`, `BTC-USD`, `CL=F`, `^N225`).
-- **Data source** — `Auto` (default), `Yahoo` or `Stooq`. Auto keeps whichever series starts earlier, which is what gets commodities their pre-2000 history. The sidebar shows the source, symbol and coverage actually in use.
+- **Data source** — `Auto` (default), `Yahoo` or `FRED`. Auto keeps whichever series starts earlier, splicing them when the FRED benchmark has been discontinued. The sidebar shows the source, series and coverage actually in use.
 - **Window** — presets (Full year, H1, H2, Q1–Q4) or a custom start month + 3/6/12-month length. Windows may wrap the year end (e.g. Nov–Jan).
 - **Years** — restrict the sample, e.g. post-1950 only.
 - **Election-cycle filter** — midterm / election / post-election / pre-election years. Midterm = year mod 4 == 2 (2018, 2022, 2026…).
@@ -126,22 +126,27 @@ from the composites — the live year is drawn separately.
 
 **Two sources.** Yahoo Finance covers everything and is split/dividend adjusted,
 but its continuous futures series are short: `GC=F` starts in 2000, and so does
-every other `=F` ticker, which leaves five or six midterm years to average.
-Stooq's free daily CSVs reach much further back for commodities and indices, so
-`Auto` fetches both for the symbols in `STOOQ_MAP` (every commodity in the preset
-list, plus the major indices and FX pairs) and keeps whichever starts earlier.
+every other `=F` ticker, which leaves five or six midterm years to average. FRED
+(St. Louis Fed) publishes the long daily benchmarks through a documented CSV API
+— LBMA gold and silver from 1968, WTI from 1986, Brent from 1987, Henry Hub gas
+from 1997 — so `Auto` fetches both for the symbols in `FRED_MAP` and keeps
+whichever starts earlier.
 
-A Stooq series is not always the same instrument as its Yahoo counterpart — gold
-maps to spot `xauusd` rather than the front COMEX contract, for example. For
-seasonality that difference is immaterial, but the sidebar always names the source
-and symbol on screen so you know what you're looking at. Stooq rate-limits
-aggressive use; a failed probe is remembered for ten minutes rather than retried
-on every rerun, and Auto quietly falls back to Yahoo.
+Some of those benchmarks were discontinued (the LBMA fixings ended in 2023), so
+their history is **spliced** onto the current Yahoo series: the old series is
+scaled by the median price ratio over the overlap. That is a level shift only —
+every year's shape, which is all seasonality reads, is untouched — and the
+sidebar shows the join date. Where the two disagree on instrument (the London fix
+versus the front COMEX contract) the label says so.
 
-Stooq symbols are mapped by convention and can only be confirmed against the live
-endpoint. `python check_sources.py` prints what each asset actually resolves to —
-a commodity still showing a Yahoo start around 2000 needs its symbol corrected in
-`STOOQ_MAP`.
+FRED has no daily history for copper, grains or softs, only monthly, so those
+stay at Yahoo's 2000 start. `python check_sources.py` prints what each asset
+actually resolves to; anything still showing 2000 needs its series id corrected
+in `FRED_MAP`.
+
+Stooq filled this role until it put its CSV endpoint behind a JavaScript
+proof-of-work bot challenge, which no script can pass. That path was removed
+rather than left broken.
 
 Seasonal averages describe past tendencies with wide dispersion around them; the
 percentile band and per-year table are there to make that dispersion visible. Not

@@ -49,11 +49,12 @@ ticker = custom.upper() if custom else preset_ticker
 
 source = st.sidebar.radio(
     "Data source", list(data_lib.SOURCES), horizontal=True, index=0,
-    format_func=lambda s: {"auto": "Auto", "yahoo": "Yahoo", "stooq": "Stooq"}[s],
+    format_func=lambda s: {"auto": "Auto", "yahoo": "Yahoo", "fred": "FRED"}[s],
     help=(
         "Auto keeps whichever source starts earlier. Yahoo's continuous futures "
-        "series all begin around 2000; Stooq reaches decades further back for "
-        "commodities and indices."
+        "series all begin around 2000; FRED carries the long benchmarks (LBMA "
+        "gold and silver from 1968, WTI from 1986) and is spliced onto Yahoo "
+        "where the benchmark has been discontinued."
     ),
 )
 

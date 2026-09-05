@@ -1,166 +1,198 @@
-"""Tests for the data layer's source selection and Stooq parsing (no network)."""
+"""Tests for the data layer: source selection, FRED parsing, splicing (no network)."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from seasonality import data as data_lib
-from seasonality.data import DataError, parse_stooq_csv, stooq_symbol
+from seasonality.data import DataError, fred_series, parse_fred_csv, splice
 
-STOOQ_CSV = """Date,Open,High,Low,Close,Volume
-1968-04-01,38.00,38.20,37.90,38.10,0
-1968-04-02,38.10,38.40,38.00,38.30,0
-1968-04-03,38.30,38.60,38.20,38.55,0
+FRED_CSV = """observation_date,GOLDAMGBD228NLBM
+1968-04-01,38.00
+1968-04-02,.
+1968-04-03,38.30
+1968-04-04,38.55
+"""
+
+FRED_CSV_LEGACY_HEADER = """DATE,DCOILWTICO
+1986-01-02,25.56
+1986-01-03,26.00
 """
 
 
-def test_commodity_symbols_all_map_to_stooq():
-    """Every Yahoo futures ticker offered in the app needs a Stooq equivalent —
-    Yahoo's continuous contracts only start around 2000."""
-    from seasonality.assets import PRESETS
-
-    for label, ticker in PRESETS["Commodities"].items():
-        assert stooq_symbol(ticker), f"no Stooq symbol for {label} ({ticker})"
+def _series(start, periods, value, end=None):
+    idx = pd.bdate_range(end=end, periods=periods) if end else pd.bdate_range(start, periods=periods)
+    return pd.DataFrame({"close": np.full(periods, float(value))}, index=idx)
 
 
-def test_stooq_symbol_guesses():
-    assert stooq_symbol("GC=F") == "xauusd"
-    assert stooq_symbol("CL=F") == "cl.f"
-    assert stooq_symbol("^GSPC") == "^spx"
-    assert stooq_symbol("AAPL") == "aapl.us"
-    assert stooq_symbol("BTC-USD") == "btcusd"
-    assert stooq_symbol("EURUSD=X") == "eurusd"
-    assert stooq_symbol("ZZ=F") is None      # unmapped future: don't invent one
-    assert stooq_symbol("") is None
+def test_map_covers_the_benchmarks_with_long_history():
+    for ticker in ("GC=F", "SI=F", "CL=F", "BZ=F", "NG=F"):
+        assert fred_series(ticker), f"no FRED series mapped for {ticker}"
+    # ids are looked up, never guessed — a wrong guess is just a wasted request
+    assert fred_series("ZC=F") is None
+    assert fred_series("AAPL") is None
+    assert fred_series("") is None
+    assert fred_series(" gc=f ") == "GOLDAMGBD228NLBM"     # tolerant of user input
 
 
-def test_parse_stooq_csv():
-    df = parse_stooq_csv(STOOQ_CSV, "xauusd")
-    assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+def test_parse_fred_csv_handles_missing_values_and_both_headers():
+    df = parse_fred_csv(FRED_CSV, "GOLDAMGBD228NLBM")
+    assert list(df.columns) == ["close"]
+    assert len(df) == 3                                     # the "." row is dropped
     assert df.index[0] == pd.Timestamp("1968-04-01")
     assert df["close"].iloc[-1] == pytest.approx(38.55)
 
+    legacy = parse_fred_csv(FRED_CSV_LEGACY_HEADER, "DCOILWTICO")
+    assert len(legacy) == 2 and legacy["close"].iloc[0] == pytest.approx(25.56)
 
-def test_parse_stooq_csv_rejects_error_pages():
+
+def test_parse_fred_csv_rejects_non_csv_bodies():
+    """Stooq's bot-challenge HTML is exactly what this guard is for."""
     with pytest.raises(DataError):
-        parse_stooq_csv("Exceeded the daily hits limit", "xauusd")
+        parse_fred_csv("<!DOCTYPE html><html><body>verify your browser</body></html>", "X")
     with pytest.raises(DataError):
-        parse_stooq_csv("<html><body>nope</body></html>", "xauusd")
+        parse_fred_csv("", "X")
 
 
-def test_auto_prefers_the_earlier_series(monkeypatch, tmp_path):
-    """Auto is the whole point for commodities: Yahoo gold starts in 2000."""
+def test_splice_scales_the_old_series_to_meet_the_new_one():
+    """The London fix and the COMEX contract sit at different levels; only the
+    level is adjusted, so each year's shape is untouched."""
+    old = _series("2015-01-01", 2000, 100.0)       # discontinued benchmark
+    new = _series("2020-01-01", 1000, 150.0)       # current series, 1.5x the level
+    combined, join = splice(old, new)
+
+    assert join is not None
+    assert combined.index[0] == old.index[0]
+    assert combined.index[-1] == new.index[-1]
+    assert combined.loc[combined.index < join, "close"].iloc[0] == pytest.approx(150.0)
+    assert combined.loc[join, "close"] == pytest.approx(150.0)
+    assert not combined.index.duplicated().any()
+    assert combined.index.is_monotonic_increasing
+
+
+def test_splice_preserves_relative_moves():
+    """A 10% move in the old series is still a 10% move after scaling — which is
+    all seasonality reads."""
+    idx = pd.bdate_range("2010-01-01", periods=1500)
+    old = pd.DataFrame({"close": np.linspace(100, 200, len(idx))}, index=idx)
+    new = pd.DataFrame(
+        {"close": np.linspace(400, 500, 800)},
+        index=pd.bdate_range(idx[-800], periods=800),
+    )
+    combined, join = splice(old, new)
+    head = combined.loc[combined.index < join, "close"]
+    old_head = old.loc[old.index < join, "close"]
+    assert np.allclose(
+        head.pct_change().dropna().values, old_head.pct_change().dropna().values
+    )
+
+
+def test_splice_refuses_without_a_usable_overlap():
+    old = _series("1990-01-01", 500, 100.0)
+    new = _series("2020-01-01", 500, 150.0)
+    combined, join = splice(old, new)
+    assert join is None
+    assert combined.equals(new)                    # no join beats a fabricated one
+
+
+def test_auto_splices_a_discontinued_benchmark(monkeypatch, tmp_path):
+    """Gold: FRED's LBMA fix ended in 2023, Yahoo starts in 2000."""
     monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
-
-    yahoo = pd.DataFrame(
-        {"close": range(300)},
-        index=pd.bdate_range("2000-08-30", periods=300),
-    )
-    stooq = pd.DataFrame(
-        {"close": range(9000)},
-        index=pd.bdate_range("1968-04-01", periods=9000),
-    )
+    data_lib.reset_failures()
+    fred = _series("1968-04-01", 14000, 100.0)
+    yahoo = _series("2000-08-30", 6500, 150.0)
     monkeypatch.setattr(data_lib, "download", lambda t: yahoo)
-    monkeypatch.setattr(data_lib, "download_stooq", lambda s, **kw: stooq)
+    monkeypatch.setattr(data_lib, "download_fred", lambda s, **kw: fred)
 
-    auto = data_lib.load_history("GC=F", source="auto")
-    assert auto.attrs["source"] == "stooq"
-    assert auto.attrs["symbol"] == "xauusd"
-    assert auto.index[0].year == 1968
-
-    forced = data_lib.load_history("GC=F", source="yahoo", force_refresh=True)
-    assert forced.attrs["source"] == "yahoo"
-    assert forced.index[0].year == 2000
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "fred+yahoo"
+    assert df.attrs["spliced_at"] is not None
+    assert df.index[0].year == 1968
+    assert df.index[-1] == yahoo.index[-1]
+    assert "joined" in data_lib.source_label(df)
 
 
-def test_auto_keeps_yahoo_when_stooq_adds_nothing(monkeypatch, tmp_path):
+def test_auto_uses_fred_alone_when_it_is_still_current(monkeypatch, tmp_path):
+    """WTI: DCOILWTICO runs to today, so there is nothing to splice."""
     monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
-    idx = pd.bdate_range("1990-01-01", periods=5000)
-    monkeypatch.setattr(data_lib, "download", lambda t: pd.DataFrame({"close": range(5000)}, index=idx))
-    monkeypatch.setattr(
-        data_lib, "download_stooq",
-        lambda s, **kw: pd.DataFrame({"close": range(4000)}, index=pd.bdate_range("1995-01-01", periods=4000)),
-    )
-    df = data_lib.load_history("^GSPC", source="auto")
+    data_lib.reset_failures()
+    fred = _series("1986-01-02", 10000, 50.0)
+    yahoo = _series(None, 6000, 50.0, end=fred.index[-1])
+    monkeypatch.setattr(data_lib, "download", lambda t: yahoo)
+    monkeypatch.setattr(data_lib, "download_fred", lambda s, **kw: fred)
+
+    df = data_lib.load_history("CL=F", source="auto")
+    assert df.attrs["source"] == "fred"
+    assert df.index[0].year == 1986
+
+
+def test_auto_keeps_yahoo_when_fred_adds_nothing(monkeypatch, tmp_path):
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
+    data_lib.reset_failures()
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("1990-01-01", 8000, 10.0))
+    monkeypatch.setattr(data_lib, "download_fred", lambda s, **kw: _series("1999-01-01", 6000, 10.0))
+    df = data_lib.load_history("EURUSD=X", source="auto")
     assert df.attrs["source"] == "yahoo"
 
 
-def test_stooq_source_without_a_mapping_is_an_error(monkeypatch, tmp_path):
+def test_auto_does_not_probe_fred_for_unmapped_tickers(monkeypatch, tmp_path):
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
+    data_lib.reset_failures()
+    calls = []
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-01-01", 500, 10.0))
+    monkeypatch.setattr(
+        data_lib, "download_fred",
+        lambda s, **kw: (calls.append(s), _series("1990-01-01", 500, 10.0))[1],
+    )
+    data_lib.load_history("AAPL", source="auto")
+    assert calls == []
+    data_lib.load_history("CL=F", source="auto", force_refresh=True)
+    assert calls == ["DCOILWTICO"]
+
+
+def test_fallback_reason_is_reported(monkeypatch, tmp_path):
+    """When FRED fails, say so instead of silently serving the short series."""
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
+    data_lib.reset_failures()
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-08-30", 500, 10.0))
+
+    def refuse(series, **kw):
+        raise DataError(f"FRED request failed for '{series}': HTTP 503")
+
+    monkeypatch.setattr(data_lib, "download_fred", refuse)
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "yahoo"
+    assert "503" in df.attrs["fallback_reason"]
+
+    again = data_lib.load_history("GC=F", source="auto", force_refresh=True)
+    assert "failed recently" in again.attrs["fallback_reason"]
+    data_lib.reset_failures()
+
+
+def test_a_failing_probe_is_not_retried_every_rerun(monkeypatch, tmp_path):
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
+    data_lib.reset_failures()
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-01-01", 500, 10.0))
+    attempts = []
+
+    def timeout(series, **kw):
+        attempts.append(series)
+        raise DataError("timed out")
+
+    monkeypatch.setattr(data_lib, "download_fred", timeout)
+    for _ in range(4):
+        data_lib.load_history("GC=F", source="auto", force_refresh=True)
+    assert attempts == ["GOLDAMGBD228NLBM"]
+    data_lib.reset_failures()
+
+
+def test_explicit_fred_source_without_a_mapping_is_an_error(monkeypatch, tmp_path):
     monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
     with pytest.raises(DataError):
-        data_lib.load_history("ZZ=F", source="stooq")
-
-
-def test_auto_falls_back_to_stooq_when_yahoo_fails(monkeypatch, tmp_path):
-    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
-    stooq = pd.DataFrame({"close": range(600)}, index=pd.bdate_range("2010-01-01", periods=600))
-
-    def boom(_t):
-        raise DataError("yahoo is down")
-
-    monkeypatch.setattr(data_lib, "download", boom)
-    monkeypatch.setattr(data_lib, "download_stooq", lambda s, **kw: stooq)
-    df = data_lib.load_history("GC=F", source="auto")
-    assert df.attrs["source"] == "stooq"
+        data_lib.load_history("ZC=F", source="fred")
 
 
 def test_source_label():
     df = pd.DataFrame({"close": [1.0]}, index=pd.to_datetime(["2020-01-01"]))
-    df.attrs.update(source="stooq", symbol="xauusd")
-    assert data_lib.source_label(df) == "Stooq · xauusd"
-
-
-def test_auto_does_not_probe_stooq_for_plain_equities(monkeypatch, tmp_path):
-    """Guessing aapl.us for every ticker would double the requests for nothing."""
-    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
-    calls = []
-    idx = pd.bdate_range("2000-01-01", periods=500)
-    monkeypatch.setattr(data_lib, "download", lambda t: pd.DataFrame({"close": range(500)}, index=idx))
-    stub = pd.DataFrame({"close": range(10)}, index=pd.bdate_range("1990-01-01", periods=10))
-    monkeypatch.setattr(data_lib, "download_stooq", lambda s, **kw: (calls.append(s), stub)[1])
-
-    df = data_lib.load_history("AAPL", source="auto")
-    assert df.attrs["source"] == "yahoo"
-    assert calls == []                        # curated map only
-
-    data_lib.load_history("GC=F", source="auto", force_refresh=True)
-    assert calls == ["xauusd"]                # ...but commodities are probed
-
-
-def test_a_failing_stooq_probe_is_not_retried_every_rerun(monkeypatch, tmp_path):
-    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
-    data_lib._FAILED.clear()
-    idx = pd.bdate_range("2000-01-01", periods=500)
-    monkeypatch.setattr(data_lib, "download", lambda t: pd.DataFrame({"close": range(500)}, index=idx))
-
-    attempts = []
-
-    def timeout(symbol, **kw):
-        attempts.append(symbol)
-        raise DataError("timed out")
-
-    monkeypatch.setattr(data_lib, "download_stooq", timeout)
-    for _ in range(4):
-        data_lib.load_history("GC=F", source="auto", force_refresh=True)
-    assert attempts == ["xauusd"]             # one attempt, then a cooldown
-    data_lib._FAILED.clear()
-
-
-def test_fallback_reason_is_reported(monkeypatch, tmp_path):
-    """When Stooq fails, say so instead of silently serving the short series."""
-    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
-    data_lib.reset_failures()
-    idx = pd.bdate_range("2000-08-30", periods=500)
-    monkeypatch.setattr(data_lib, "download", lambda t: pd.DataFrame({"close": range(500)}, index=idx))
-
-    def refuse(symbol, **kw):
-        raise DataError(f"Stooq returned no data for '{symbol}': Exceeded the daily hits limit")
-
-    monkeypatch.setattr(data_lib, "download_stooq", refuse)
-    df = data_lib.load_history("GC=F", source="auto")
-    assert df.attrs["source"] == "yahoo"
-    assert "daily hits limit" in df.attrs["fallback_reason"]
-
-    # the cooldown is visible too, rather than looking like success
-    again = data_lib.load_history("GC=F", source="auto", force_refresh=True)
-    assert "failed recently" in again.attrs["fallback_reason"]
-    data_lib.reset_failures()
+    df.attrs.update(source="fred", symbol="DCOILWTICO")
+    assert data_lib.source_label(df) == "FRED · DCOILWTICO"

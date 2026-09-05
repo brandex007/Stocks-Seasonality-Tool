@@ -45,9 +45,11 @@ _UA = "Mozilla/5.0 (compatible; seasonality-explorer/1.0)"
 #: Yahoo symbol -> FRED series id, for daily series that reach further back.
 #: Commodities are the main reason this exists: every Yahoo ``=F`` continuous
 #: contract starts around 2000. Series marked "ended" are spliced onto Yahoo.
+#: Gold and silver are absent on purpose: FRED carried the LBMA fixings
+#: (GOLDAMGBD228NLBM, SLVPRUSD) until they were discontinued *and removed* - both
+#: ids now 404 - and its remaining precious-metal series are monthly, which
+#: cannot drive a daily path. See ``check_sources.py --probe``.
 FRED_MAP: dict[str, str] = {
-    "GC=F": "GOLDAMGBD228NLBM",   # LBMA gold AM fix, 1968-  (ended 2023)
-    "SI=F": "SLVPRUSD",           # LBMA silver,      1968-  (ended 2023)
     "CL=F": "DCOILWTICO",         # WTI spot,         1986-
     "BZ=F": "DCOILBRENTEU",       # Brent spot,       1987-
     "NG=F": "DHHNGSP",            # Henry Hub gas,    1997-

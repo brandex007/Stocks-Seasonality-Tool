@@ -55,6 +55,46 @@ def raw_probe(symbol: str, timeout: float = 20.0) -> str:
         return f"{type(exc).__name__}: {exc} · {url}"
 
 
+#: Candidate long-history endpoints for the metals FRED dropped. Probed, not
+#: assumed: whichever answers with usable data gets wired into data.py.
+CANDIDATES = [
+    ("gold  LBMA AM fix JSON", "https://prices.lbma.org.uk/json/gold_am.json"),
+    ("gold  LBMA PM fix JSON", "https://prices.lbma.org.uk/json/gold_pm.json"),
+    ("silver LBMA JSON", "https://prices.lbma.org.uk/json/silver.json"),
+    ("gold  FRED PM fix (may also be gone)",
+     "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GOLDPMGBD228NLBM"),
+    ("gold  FRED IMF monthly", "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PGOLDUSDM"),
+    ("silver FRED IMF monthly", "https://fred.stlouisfed.org/graph/fredgraph.csv?id=PSILVUSDM"),
+]
+
+
+def probe_candidates() -> None:
+    """Try each candidate source and show what comes back."""
+    print("Probing candidate gold/silver sources:\n")
+    for label, url in CANDIDATES:
+        print(f"--- {label}")
+        print(f"    {url}")
+        for line in raw_url(url).splitlines():
+            print(f"    {line}")
+        print()
+
+
+def raw_url(url: str, timeout: float = 20.0) -> str:
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"User-Agent": data_lib._UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(300).decode("utf-8", errors="replace")
+            return (f"HTTP {resp.status} · {resp.headers.get('content-type', '?')}\n"
+                    f"{' '.join(body.split())[:280]}")
+    except urllib.error.HTTPError as exc:
+        return f"HTTP {exc.code} {exc.reason}"
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("tickers", nargs="*", help="tickers to check (default: commodities)")
@@ -62,7 +102,13 @@ def main(argv=None) -> int:
     p.add_argument("--refresh", action="store_true", help="ignore the cache")
     p.add_argument("--raw", action="store_true",
                    help="print FRED's raw response for each symbol (what's really wrong)")
+    p.add_argument("--probe", action="store_true",
+                   help="try candidate gold/silver sources and report what answers")
     a = p.parse_args(argv)
+
+    if a.probe:
+        probe_candidates()
+        return 0
 
     if a.tickers:
         tickers = a.tickers

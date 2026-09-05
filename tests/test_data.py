@@ -26,13 +26,21 @@ def _series(start, periods, value, end=None):
 
 
 def test_map_covers_the_benchmarks_with_long_history():
-    for ticker in ("GC=F", "SI=F", "CL=F", "BZ=F", "NG=F"):
+    for ticker in ("CL=F", "BZ=F", "NG=F"):
         assert fred_series(ticker), f"no FRED series mapped for {ticker}"
     # ids are looked up, never guessed — a wrong guess is just a wasted request
     assert fred_series("ZC=F") is None
     assert fred_series("AAPL") is None
     assert fred_series("") is None
-    assert fred_series(" gc=f ") == "GOLDAMGBD228NLBM"     # tolerant of user input
+    assert fred_series(" cl=f ") == "DCOILWTICO"           # tolerant of user input
+
+
+def test_dead_precious_metal_ids_are_not_mapped():
+    """FRED removed the LBMA gold and silver fixings; both ids 404 now, so
+    mapping them just costs a failed request on every load."""
+    assert fred_series("GC=F") is None
+    assert fred_series("SI=F") is None
+    assert "GOLDAMGBD228NLBM" not in data_lib.FRED_MAP.values()
 
 
 def test_parse_fred_csv_handles_missing_values_and_both_headers():
@@ -96,7 +104,7 @@ def test_splice_refuses_without_a_usable_overlap():
 
 
 def test_auto_splices_a_discontinued_benchmark(monkeypatch, tmp_path):
-    """Gold: FRED's LBMA fix ended in 2023, Yahoo starts in 2000."""
+    """A discontinued benchmark still has to reach today's price."""
     monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
     data_lib.reset_failures()
     fred = _series("1968-04-01", 14000, 100.0)
@@ -104,7 +112,7 @@ def test_auto_splices_a_discontinued_benchmark(monkeypatch, tmp_path):
     monkeypatch.setattr(data_lib, "download", lambda t: yahoo)
     monkeypatch.setattr(data_lib, "download_fred", lambda s, **kw: fred)
 
-    df = data_lib.load_history("GC=F", source="auto")
+    df = data_lib.load_history("CL=F", source="auto")
     assert df.attrs["source"] == "fred+yahoo"
     assert df.attrs["spliced_at"] is not None
     assert df.index[0].year == 1968
@@ -160,11 +168,11 @@ def test_fallback_reason_is_reported(monkeypatch, tmp_path):
         raise DataError(f"FRED request failed for '{series}': HTTP 503")
 
     monkeypatch.setattr(data_lib, "download_fred", refuse)
-    df = data_lib.load_history("GC=F", source="auto")
+    df = data_lib.load_history("CL=F", source="auto")
     assert df.attrs["source"] == "yahoo"
     assert "503" in df.attrs["fallback_reason"]
 
-    again = data_lib.load_history("GC=F", source="auto", force_refresh=True)
+    again = data_lib.load_history("CL=F", source="auto", force_refresh=True)
     assert "failed recently" in again.attrs["fallback_reason"]
     data_lib.reset_failures()
 
@@ -181,15 +189,15 @@ def test_a_failing_probe_is_not_retried_every_rerun(monkeypatch, tmp_path):
 
     monkeypatch.setattr(data_lib, "download_fred", timeout)
     for _ in range(4):
-        data_lib.load_history("GC=F", source="auto", force_refresh=True)
-    assert attempts == ["GOLDAMGBD228NLBM"]
+        data_lib.load_history("CL=F", source="auto", force_refresh=True)
+    assert attempts == ["DCOILWTICO"]
     data_lib.reset_failures()
 
 
 def test_explicit_fred_source_without_a_mapping_is_an_error(monkeypatch, tmp_path):
     monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
     with pytest.raises(DataError):
-        data_lib.load_history("ZC=F", source="fred")
+        data_lib.load_history("GC=F", source="fred")
 
 
 def test_source_label():

@@ -171,8 +171,12 @@ def build_figure(
         if p is not None:
             fig.add_vline(x=cal[p], line=dict(color=ACCENT, width=1.2, dash="dash"))
             fig.add_annotation(
-                x=cal[p], y=1.02, yref="paper", text="Election Day", showarrow=False,
-                xanchor="left", xshift=4, font=dict(size=11, color=ACCENT),
+                x=cal[p], y=1.02, yref="paper",
+                # the date is spelled out because month labels sit at month
+                # midpoints, so a line between two of them is ambiguous
+                text=f"Election Day · {ed.strftime('%b')} {ed.day}",
+                showarrow=False, xanchor="left", xshift=4,
+                font=dict(size=11, color=ACCENT),
             )
 
     if show_today:
@@ -180,8 +184,10 @@ def build_figure(
         if p is not None:
             fig.add_vline(x=cal[p], line=dict(color="#2E7D32", width=1.2, dash="dot"))
             fig.add_annotation(
-                x=cal[p], y=0.03, yref="paper", text="you are here", showarrow=False,
-                xanchor="left", xshift=4, font=dict(size=11, color="#2E7D32"),
+                x=cal[p], y=0.03, yref="paper",
+                text=f"you are here · {today.strftime('%b')} {today.day}",
+                showarrow=False, xanchor="left", xshift=4,
+                font=dict(size=11, color="#2E7D32"),
             )
 
     # Never leave the title unset: Streamlit's plotly theme wraps the title in

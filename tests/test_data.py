@@ -65,17 +65,26 @@ def test_parse_fred_csv_rejects_non_csv_bodies():
 def test_splice_scales_the_old_series_to_meet_the_new_one():
     """The London fix and the COMEX contract sit at different levels; only the
     level is adjusted, so each year's shape is untouched."""
-    old = _series("2015-01-01", 2000, 100.0)       # discontinued benchmark
+    old = _series("2015-01-01", 2000, 100.0)       # long history
     new = _series("2020-01-01", 1000, 150.0)       # current series, 1.5x the level
     combined, join = splice(old, new)
 
-    assert join is not None
+    assert join == new.index[0]                    # handover where the new one starts
     assert combined.index[0] == old.index[0]
     assert combined.index[-1] == new.index[-1]
     assert combined.loc[combined.index < join, "close"].iloc[0] == pytest.approx(150.0)
     assert combined.loc[join, "close"] == pytest.approx(150.0)
     assert not combined.index.duplicated().any()
     assert combined.index.is_monotonic_increasing
+
+
+def test_splice_at_end_keeps_one_instrument_as_long_as_possible():
+    """The other join, for a benchmark that was discontinued mid-life."""
+    old = _series("2015-01-01", 2000, 100.0)
+    new = _series("2020-01-01", 1000, 150.0)
+    combined, join = splice(old, new, at="end")
+    assert join == old.index[-1]
+    assert combined.loc[combined.index < join, "close"].iloc[0] == pytest.approx(150.0)
 
 
 def test_splice_preserves_relative_moves():
@@ -120,18 +129,27 @@ def test_auto_splices_a_discontinued_benchmark(monkeypatch, tmp_path):
     assert "joined" in data_lib.source_label(df)
 
 
-def test_auto_uses_fred_alone_when_it_is_still_current(monkeypatch, tmp_path):
-    """WTI: DCOILWTICO runs to today, so there is nothing to splice."""
+def test_auto_hands_over_to_yahoo_where_yahoo_exists(monkeypatch, tmp_path):
+    """WTI: FRED covers 1986-2000, then Yahoo's adjusted series takes over —
+    even though FRED still runs to today. The long source fills the gap in
+    front of Yahoo, it doesn't replace it."""
     monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", tmp_path / "none")
     data_lib.reset_failures()
     fred = _series("1986-01-02", 10000, 50.0)
-    yahoo = _series(None, 6000, 50.0, end=fred.index[-1])
-    monkeypatch.setattr(data_lib, "download", lambda t: yahoo)
+    yahoo = _series(None, 6000, 75.0, end=fred.index[-1])       # different level
+    monkeypatch.setattr(data_lib, "download", lambda t: fred if False else yahoo)
     monkeypatch.setattr(data_lib, "download_fred", lambda s, **kw: fred)
 
     df = data_lib.load_history("CL=F", source="auto")
-    assert df.attrs["source"] == "fred"
-    assert df.index[0].year == 1986
+    assert df.attrs["source"] == "fred+yahoo"
+    assert df.index[0].year == 1986                              # history from FRED
+    join = df.attrs["spliced_at"]
+    assert join == yahoo.index[0]                                # handover at Yahoo's start
+    # everything from the handover on is Yahoo's own values, unscaled
+    assert df.loc[join:, "close"].eq(75.0).all()
+    # and the borrowed years are lifted onto Yahoo's level, so no step at the seam
+    assert df.loc[df.index < join, "close"].iloc[-1] == pytest.approx(75.0)
 
 
 def test_auto_keeps_yahoo_when_fred_adds_nothing(monkeypatch, tmp_path):

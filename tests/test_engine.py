@@ -229,3 +229,25 @@ def test_band_source_follows_the_filter_by_default():
     from seasonality.chart import build_figure
     names = [t.name for t in build_figure(res).data if t.name]
     assert any("midterm year" in n for n in names)  # legend says what it covers
+
+
+def test_today_and_election_markers_name_their_date():
+    """Month names sit at month midpoints, so a bare marker line between two of
+    them reads as the wrong month. The label spells the date out."""
+    import datetime as dt
+
+    from seasonality.chart import build_figure, cal_position
+
+    res = compute_seasonality(synthetic_close(end="2026-09-04"), "TEST", 1, 12)
+    today = dt.date(2026, 9, 5)
+    fig = build_figure(res, today=today)
+    labels = [a.text for a in fig.layout.annotations]
+    assert "you are here · Sep 5" in labels
+    assert "Election Day · Nov 3" in labels          # first Tue after first Mon
+
+    # and the line really is inside September, not August
+    cal = res.calendar
+    slot = cal_position(cal, 9, 5)
+    assert cal[slot].month == 9
+    sept = [i for i, d in enumerate(cal) if d.month == 9]
+    assert sept[0] <= slot <= sept[-1]

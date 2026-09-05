@@ -379,21 +379,36 @@ def download_fred(series: str, timeout: float = 20.0) -> pd.DataFrame:
     return parse_fred_csv(text, series)
 
 
-def splice(old: pd.DataFrame, new: pd.DataFrame) -> tuple[pd.DataFrame, pd.Timestamp | None]:
-    """Chain a discontinued long history onto the current series.
+def splice(
+    old: pd.DataFrame,
+    new: pd.DataFrame,
+    at: str = "start",
+) -> tuple[pd.DataFrame, pd.Timestamp | None]:
+    """Join a long history onto the current series, level-matched.
 
-    The LBMA gold and silver fixings ended in 2023, so their FRED history has to
-    be joined to Yahoo's to reach today. The old series is scaled by the median
-    price ratio over the overlap — a level shift only, so every year's *shape*,
-    which is all seasonality cares about, is untouched. Returns the combined
-    close-only frame and the join date (None when no splice happened).
+    ``at="start"`` (the default) hands over at the **first** date the two share,
+    so the long series only fills the years before the current one begins and
+    everything from there on is the live, split/dividend-adjusted data. That is
+    what "aggregate the two" normally means: use the good recent series, and
+    borrow history for the gap in front of it.
+
+    ``at="end"`` hands over at the last shared date instead, keeping one
+    instrument for as long as possible - right for a benchmark that was
+    discontinued and has only a stub of the new series after it.
+
+    Either way the old series is scaled by the median price ratio over the 60
+    shared days nearest the join, so the seam has no step in it. That is a level
+    shift only: every year's shape, which is all seasonality reads, is untouched.
+    Returns the combined close-only frame and the join date (None if the two
+    don't overlap enough to level-match, in which case ``new`` is returned as-is).
     """
     overlap = old.index.intersection(new.index)
     if len(overlap) < MIN_SPLICE_OVERLAP:
         return new, None
 
-    tail = overlap[-min(len(overlap), 60):]
-    ratios = (new.loc[tail, "close"] / old.loc[tail, "close"]).replace(
+    join = overlap[0] if at == "start" else overlap[-1]
+    window = overlap[:60] if at == "start" else overlap[-60:]
+    ratios = (new.loc[window, "close"] / old.loc[window, "close"]).replace(
         [float("inf"), float("-inf")], pd.NA
     ).dropna()
     if ratios.empty:
@@ -402,7 +417,6 @@ def splice(old: pd.DataFrame, new: pd.DataFrame) -> tuple[pd.DataFrame, pd.Times
     if not (ratio > 0) or not pd.notna(ratio):
         return new, None
 
-    join = overlap[-1]
     head = old.loc[old.index < join, ["close"]] * ratio
     combined = pd.concat([head, new.loc[new.index >= join, ["close"]]])
     combined = combined[~combined.index.duplicated(keep="last")].sort_index()
@@ -585,12 +599,10 @@ def load_history(
             )
         return out
 
-    # The long series wins. If it also runs to today, use it alone; otherwise
-    # splice Yahoo onto the end so the chart reaches the current price.
-    if (y_df.index[-1] - long_df.index[-1]).days <= 7:
-        return _tag(long_df, long_kind, long_name)
-
-    combined, join = splice(long_df, y_df)
+    # The long series wins the early years. Yahoo takes over from the day it
+    # starts, so the recent decades are the adjusted, still-updating series and
+    # the long source only fills the gap in front of it.
+    combined, join = splice(long_df, y_df, at="start")
     if join is None:
         out = _tag(long_df, long_kind, long_name)
         out.attrs["fallback_reason"] = (

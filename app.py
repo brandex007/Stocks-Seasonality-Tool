@@ -50,13 +50,15 @@ ticker = custom.upper() if custom else preset_ticker
 source = st.sidebar.radio(
     "Data source", list(data_lib.SOURCES), horizontal=True, index=0,
     format_func=lambda s: {
-        "auto": "Auto", "yahoo": "Yahoo", "fred": "FRED", "custom": "CSV",
+        "auto": "Auto", "yahoo": "Yahoo", "fred": "FRED",
+        "github": "LBMA", "custom": "CSV",
     }[s],
     help=(
         "Auto puts the longest available history in front of Yahoo's current "
         "series, splicing where they meet. Yahoo's continuous futures all begin "
-        "around 2000; FRED carries WTI from 1986 and Brent from 1987; a CSV you "
-        "drop in data/custom/ outranks both."
+        "around 2000; gold and silver come from the LBMA daily fixes (1968-); "
+        "FRED carries WTI from 1986 and Brent from 1987. A CSV you drop in "
+        "data/custom/ outranks all of them."
     ),
 )
 
@@ -108,7 +110,8 @@ if _custom:
 else:
     st.sidebar.caption(
         "Longer history? Drop a daily CSV in `data/custom/` named for the ticker "
-        "(e.g. `GC_F.csv`) and it is spliced in front of Yahoo."
+        "(e.g. `GC_F.csv`) and it is spliced in front of Yahoo, ahead of every "
+        "built-in source."
     )
 
 st.sidebar.subheader("Years")

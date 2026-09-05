@@ -54,7 +54,7 @@ full year). Turn the day ticks off in the sidebar for month names only.
 ## Controls
 
 - **Asset** — preset lists by category, or type any Yahoo ticker (`NVDA`, `BTC-USD`, `CL=F`, `^N225`).
-- **Data source** — `Auto` (default), `Yahoo`, `FRED` or `CSV`. Auto puts the longest available history in front of Yahoo's current series and splices where they meet. The sidebar shows the source, series and coverage actually in use.
+- **Data source** — `Auto` (default), `Yahoo`, `FRED`, `LBMA` or `CSV`. Auto puts the longest available history in front of Yahoo's current series and splices where they meet. The sidebar shows the source, series and coverage actually in use.
 - **Window** — presets (Full year, H1, H2, Q1–Q4) or a custom start month + 3/6/12-month length. Windows may wrap the year end (e.g. Nov–Jan).
 - **Years** — restrict the sample, e.g. post-1950 only.
 - **Election-cycle filter** — midterm / election / post-election / pre-election years. Midterm = year mod 4 == 2 (2018, 2022, 2026…).
@@ -125,12 +125,13 @@ download fails the app falls back to the cached copy. Years that don't cover the
 window (a listing that starts mid-window, or the year in progress) are excluded
 from the composites — the live year is drawn separately.
 
-**Three sources, longest first.** Yahoo Finance covers everything and is
+**Four sources, longest first.** Yahoo Finance covers everything and is
 split/dividend adjusted, but its continuous futures series are short: `GC=F`
 starts in 2000, and so does every other `=F` ticker, leaving five or six midterm
 years to average. FRED (St. Louis Fed) publishes long daily benchmarks through a
 documented CSV API — WTI from 1986, Brent from 1987, Henry Hub gas from 1997.
-Anything you drop in `data/custom/` outranks both.
+Gold and silver come from the LBMA's daily fixes (1968-), fetched at runtime from
+a public dataset repo. Anything you drop in `data/custom/` outranks all of them.
 
 `Auto` takes Yahoo as the current series, finds the longest earlier one
 available, and **splices** them: the older series is scaled by the median price
@@ -139,14 +140,18 @@ shift only — every year's shape, which is all seasonality reads, is untouched 
 and the sidebar shows the join date. Where the two are different instruments (the
 London fix versus the front COMEX contract) the label says so.
 
+**No price data is vendored in this repo.** The LBMA gold and silver histories
+are fetched from `raw.githubusercontent.com` on first use and cached locally, so
+what is committed here is a URL rather than someone else's data — which also
+keeps a deployed copy of the app working without shipping 550 KB of prices. If
+that repo ever moves, the app says so in the sidebar and falls back to Yahoo.
+
 **Your own CSVs** go in `data/custom/`, named for the ticker (`GC_F.csv` for
 `GC=F`). One date column and one price column, any of the usual spellings, either
-sort order; see `data/custom/README.md`. This is how gold and silver get their
-pre-2000 history: FRED carried the LBMA fixings until they were discontinued *and
-removed* (both ids now 404), and its remaining precious-metal series are monthly,
-which cannot drive a daily path. Download the LBMA daily history once, drop it in,
-and the app splices Yahoo onto the end. Hit **↻ Refresh price data** after adding
-a file — the loader caches for six hours.
+sort order; see `data/custom/README.md`. Use one when you have better data than the app can
+find, or to work fully offline: a local file wins over every network source and
+costs no request. Hit **↻ Refresh price data** after adding one — the loader
+caches for six hours.
 
 FRED has no daily history for copper, grains or softs either, so those stay at
 Yahoo's 2000 start unless you supply a CSV. `python check_sources.py` prints what

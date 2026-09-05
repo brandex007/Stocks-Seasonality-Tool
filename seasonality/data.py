@@ -61,9 +61,26 @@ FRED_MAP: dict[str, str] = {
     "GBPUSD=X": "DEXUSUK",        # 1971-
 }
 
+#: Daily series fetched from a public dataset repo at runtime, as
+#: ``ticker -> (url, price column)``. Referenced rather than vendored: the repo
+#: holds a URL, not somebody else's price data. FRED carried the LBMA gold and
+#: silver fixings until it removed them, and nothing else free covers 1968-.
+REMOTE_CSV: dict[str, tuple[str, str]] = {
+    "GC=F": (
+        "https://raw.githubusercontent.com/unbalancedparentheses/forex-centuries"
+        "/main/data/sources/lbma/lbma_gold_daily.csv",
+        "gold_pm_usd",
+    ),
+    "SI=F": (
+        "https://raw.githubusercontent.com/unbalancedparentheses/forex-centuries"
+        "/main/data/sources/lbma/lbma_silver_daily.csv",
+        "silver_usd",
+    ),
+}
+
 MIN_SPLICE_OVERLAP = 20  # trading days needed to ratio-match two series
 
-SOURCES = ("auto", "yahoo", "fred", "custom")
+SOURCES = ("auto", "yahoo", "fred", "github", "custom")
 
 
 class DataError(RuntimeError):
@@ -258,6 +275,67 @@ def custom_tickers() -> list[str]:
     )
 
 
+def drop_weekend_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Remove Saturday/Sunday rows from a fixing series.
+
+    The London fixes are weekday auctions, so a weekend row is a data artefact —
+    and in practice a bad one: the silver file carries 7.54 for Saturday
+    1983-02-05 against ~14.10 either side. Returns the cleaned frame and the
+    dates dropped, so callers can say what they removed.
+    """
+    weekend = df.index.dayofweek >= 5
+    return df[~weekend], [f"{d:%Y-%m-%d}" for d in df.index[weekend]]
+
+
+def parse_remote_csv(text: str, price_col: str, label: str) -> pd.DataFrame:
+    """Parse a fetched dataset CSV, keeping one named price column."""
+    head = text.lstrip()[:200].lower()
+    if "," not in head or head.startswith("<"):
+        snippet = " ".join(text.split())[:140] or "empty response"
+        raise DataError(f"{label} did not return CSV: {snippet}")
+
+    df = pd.read_csv(io.StringIO(text))
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    date_col = next((c for c in _DATE_COLUMNS if c in df.columns), df.columns[0])
+    if price_col not in df.columns:
+        raise DataError(
+            f"{label}: no '{price_col}' column (found {list(df.columns)}). "
+            "The upstream file's layout may have changed."
+        )
+    out = pd.DataFrame(
+        {"close": pd.to_numeric(df[price_col], errors="coerce").to_numpy()},
+        index=pd.to_datetime(df[date_col], errors="coerce"),
+    )
+    out = out[out.index.notna()].dropna().sort_index()
+    out = out[~out.index.duplicated(keep="last")]
+    out = out[out["close"] > 0]
+    out, _ = drop_weekend_rows(out)
+    if out.empty:
+        raise DataError(f"{label} returned no usable rows.")
+    return out
+
+
+def download_remote(ticker: str, timeout: float = 20.0) -> pd.DataFrame:
+    """Fetch the mapped dataset CSV for ``ticker``."""
+    entry = REMOTE_CSV.get(ticker.strip().upper())
+    if not entry:
+        raise DataError(f"No dataset URL is known for '{ticker}'.")
+    url, price_col = entry
+    label = url.rsplit("/", 1)[-1]
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        raise DataError(f"Dataset request failed for '{label}': {exc}") from exc
+    return parse_remote_csv(text, price_col, label)
+
+
+def remote_label(ticker: str) -> str | None:
+    entry = REMOTE_CSV.get(ticker.strip().upper())
+    return entry[0].rsplit("/", 1)[-1] if entry else None
+
+
 def parse_fred_csv(text: str, series: str) -> pd.DataFrame:
     """Parse a FRED CSV into a close-only frame.
 
@@ -387,7 +465,8 @@ def load_history(
 
     ``source`` is ``"yahoo"``, ``"fred"``, ``"custom"`` or ``"auto"``. Auto takes
     Yahoo as the current series and looks for a longer one to put in front of it:
-    a CSV you dropped in ``data/custom/`` first, then FRED. When that longer
+    a CSV you dropped in ``data/custom/`` first, then a mapped dataset URL, then
+    FRED. When that longer
     series stops before today — a discontinued benchmark, or a one-off download
     of pre-2000 history — the two are spliced. The source, symbol and any splice
     date are recorded in ``df.attrs``. Falls back to the cached copy when the
@@ -409,6 +488,14 @@ def load_history(
                 f"'{_safe_name(ticker)}.csv' with a date column and a price column."
             )
         return _tag(df, "custom", custom_path(ticker).name)
+
+    if source == "github":
+        df, err = _cached_or_download(
+            ticker, "github", lambda: download_remote(ticker), force_refresh, max_age_hours
+        )
+        if df is None:
+            raise err or DataError(f"No dataset history for '{ticker}'.")
+        return _tag(df, "github", remote_label(ticker) or ticker)
 
     if source == "fred":
         if not series:
@@ -441,9 +528,25 @@ def load_history(
     except DataError as exc:
         note = str(exc)          # a malformed CSV should say so, not vanish
 
+    if long_df is None and ticker.upper() in REMOTE_CSV:
+        rlabel = remote_label(ticker)
+        if _recently_failed(rlabel):
+            note = note or f"Dataset fetch for '{rlabel}' failed recently; retrying later."
+        else:
+            r_df, r_err = _cached_or_download(
+                ticker, "github",
+                lambda: download_remote(ticker, timeout=10.0),
+                force_refresh, max_age_hours,
+            )
+            if r_df is None and r_err is not None:
+                _note_failure(rlabel)
+                note = note or str(r_err)
+            elif r_df is not None:
+                long_df, long_kind, long_name = r_df, "github", rlabel
+
     if long_df is None and series:
         if _recently_failed(series):
-            note = f"FRED probe for '{series}' failed recently; retrying later."
+            note = note or f"FRED probe for '{series}' failed recently; retrying later."
         else:
             f_df, f_err = _cached_or_download(
                 ticker, "fred",
@@ -452,7 +555,7 @@ def load_history(
             )
             if f_df is None and f_err is not None:
                 _note_failure(series)
-                note = str(f_err)
+                note = note or str(f_err)
             elif f_df is not None:
                 long_df, long_kind, long_name = f_df, "fred", series
 
@@ -508,8 +611,10 @@ def source_label(df: pd.DataFrame) -> str:
         "yahoo": "Yahoo Finance",
         "fred": "FRED",
         "custom": "Your CSV",
+        "github": "LBMA dataset",
         "fred+yahoo": "FRED spliced to Yahoo",
         "custom+yahoo": "Your CSV spliced to Yahoo",
+        "github+yahoo": "LBMA dataset spliced to Yahoo",
     }.get(src, src)
     label = f"{name} · {sym}" if sym else name
     join = df.attrs.get("spliced_at")

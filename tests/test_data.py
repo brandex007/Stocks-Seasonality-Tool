@@ -326,7 +326,97 @@ def test_a_broken_custom_csv_is_reported_not_swallowed(tmp_path, monkeypatch):
     d = _write_custom(tmp_path, "GC_F.csv", "nonsense\nrows,without,dates\n")
     monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
     monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-08-30", 500, 150.0))
+    monkeypatch.setattr(data_lib, "download_remote",
+                        lambda tk, **kw: (_ for _ in ()).throw(DataError("offline")))
 
     df = data_lib.load_history("GC=F", source="auto")
     assert df.attrs["source"] == "yahoo"
     assert "GC_F.csv" in df.attrs["fallback_reason"]
+
+
+# ------------------------------------------------- runtime dataset (github)
+
+REMOTE_GOLD_CSV = """date,gold_pm_usd,gold_pm_gbp,gold_pm_eur
+1968-04-01,37.7,15.68,0
+1968-04-02,37.3,37.3,0
+1968-04-03,37.6,15.66,0
+"""
+
+REMOTE_SILVER_WITH_WEEKEND = """date,silver_usd,silver_gbp
+1983-02-04,14.152,9.3
+1983-02-05,7.540,4.9
+1983-02-07,13.690,9.0
+"""
+
+
+def test_remote_csv_keeps_the_named_price_column():
+    df = data_lib.parse_remote_csv(REMOTE_GOLD_CSV, "gold_pm_usd", "lbma_gold_daily.csv")
+    assert list(df.columns) == ["close"]
+    assert df["close"].iloc[0] == pytest.approx(37.7)      # not the GBP or EUR column
+    assert len(df) == 3
+
+
+def test_remote_csv_drops_weekend_fixes():
+    """1983-02-05 was a Saturday and reads 7.54 against ~14 either side — the one
+    bad print in the silver file, and it is always a weekend row."""
+    df = data_lib.parse_remote_csv(REMOTE_SILVER_WITH_WEEKEND, "silver_usd", "silver.csv")
+    assert len(df) == 2
+    assert pd.Timestamp("1983-02-05") not in df.index
+    assert df["close"].min() > 13
+
+
+def test_remote_csv_reports_a_changed_upstream_layout():
+    with pytest.raises(DataError, match="gold_pm_usd"):
+        data_lib.parse_remote_csv("date,price\n1968-04-01,37.7\n", "gold_pm_usd", "f.csv")
+    with pytest.raises(DataError):
+        data_lib.parse_remote_csv("<html>404</html>", "gold_pm_usd", "f.csv")
+
+
+def test_auto_fetches_the_dataset_for_gold_and_splices(tmp_path, monkeypatch):
+    """No CSV on disk: gold still reaches 1968 from the dataset URL."""
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", tmp_path / "none")
+    data_lib.reset_failures()
+    remote = _series("1968-04-01", 14000, 100.0)
+    yahoo = _series("2000-08-30", 6500, 150.0)
+    monkeypatch.setattr(data_lib, "download", lambda t: yahoo)
+    monkeypatch.setattr(data_lib, "download_remote", lambda tk, **kw: remote)
+
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "github+yahoo"
+    assert df.index[0].year == 1968
+    assert df.index[-1] == yahoo.index[-1]
+    assert "LBMA dataset" in data_lib.source_label(df)
+
+
+def test_a_local_csv_still_outranks_the_dataset(tmp_path, monkeypatch):
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path / "cache")
+    data_lib.reset_failures()
+    idx = pd.bdate_range("1970-01-01", "2001-12-31")
+    d = _write_custom(tmp_path, "GC_F.csv",
+                      "Date,Close\n" + "\n".join(f"{x:%Y-%m-%d},100.0" for x in idx))
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-08-30", 6500, 150.0))
+    fetched = []
+    monkeypatch.setattr(data_lib, "download_remote",
+                        lambda tk, **kw: fetched.append(tk) or _series("1968-04-01", 14000, 100.0))
+
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "custom+yahoo"
+    assert fetched == []                       # no request made at all
+
+
+def test_dataset_failure_falls_back_to_yahoo_with_a_reason(tmp_path, monkeypatch):
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", tmp_path / "none")
+    data_lib.reset_failures()
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-08-30", 6500, 150.0))
+
+    def offline(tk, **kw):
+        raise DataError("Dataset request failed for 'lbma_gold_daily.csv': timed out")
+
+    monkeypatch.setattr(data_lib, "download_remote", offline)
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "yahoo"
+    assert "lbma_gold_daily.csv" in df.attrs["fallback_reason"]
+    data_lib.reset_failures()

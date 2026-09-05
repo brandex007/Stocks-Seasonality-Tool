@@ -76,7 +76,7 @@ if window_mode == "Preset":
     preset_name = st.sidebar.selectbox(
         "Period",
         list(WINDOW_PRESETS.keys()),
-        index=list(WINDOW_PRESETS).index("H2 (Jul–Dec)"),
+        index=list(WINDOW_PRESETS).index("Full year (Jan–Dec)"),
     )
     start_month, n_months = WINDOW_PRESETS[preset_name]
 else:

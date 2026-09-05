@@ -189,3 +189,12 @@ def test_title_is_never_none():
 
     titled = build_figure(res, title="VIX", subtitle="1990–2025")
     assert "VIX" in titled.layout.title.text
+
+
+def test_y_axis_has_no_rotated_title():
+    """A rotated y-axis title overlapped the tick numbers on narrow screens."""
+    from seasonality.chart import build_figure
+
+    fig = build_figure(compute_seasonality(synthetic_close(), "TEST", 7, 6))
+    assert not fig.layout.yaxis.title.text
+    assert fig.layout.yaxis.automargin is True

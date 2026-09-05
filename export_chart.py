@@ -75,7 +75,7 @@ def main(argv=None) -> int:
         res,
         title=f"{name} — {res.window_name} seasonality",
         subtitle=(f"{'Median' if a.median else 'Average'} of {res.stats_all.n_years} years "
-                  f"({min(res.stats_all.years)}–{max(res.stats_all.years)}), indexed to window start"),
+                  f"({min(res.stats_all.years)}–{max(res.stats_all.years)}), indexed to 100 at window start"),
         today=dt.date.today(),
         day_ticks=not a.no_day_ticks,
         show_all_years=not a.only_filtered,

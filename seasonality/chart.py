@@ -212,9 +212,12 @@ def build_figure(
         hoverformat="%b %d",
     )
     _apply_month_axis(fig, cal, day_ticks=day_ticks)
+    # No rotated axis title: on a narrow viewport it overlapped the tick numbers.
+    # automargin keeps the tick labels themselves from ever being clipped, and
+    # the "= 100" baseline is stated in the subtitle/caption instead.
     fig.update_yaxes(
-        showgrid=True, gridcolor=GRID, zeroline=False,
-        title="Index (window start = 100)", title_font=dict(color=MUTED, size=12),
+        showgrid=True, gridcolor=GRID, zeroline=False, title_text=None,
+        automargin=True, tickfont=dict(size=11, color=MUTED),
     )
     return fig
 

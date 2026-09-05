@@ -130,8 +130,20 @@ def test_figure_has_month_labels():
     labels = [a.text for a in fig.layout.annotations]
     for month in ("Jul", "Aug", "Sep", "Oct", "Nov", "Dec"):
         assert f"<b>{month}</b>" in labels
-    # day-of-month ticks present and not year-stamped
-    assert set(fig.layout.xaxis.ticktext) == {"1", "10", "20"}
+    # day-of-month numbers are drawn as their own row
+    assert {"1", "10", "20"}.issubset(set(labels))
+
+    # array ticks are what made plotly's unified hover print "undefined",
+    # and native tick labels would duplicate the annotation rows
+    assert fig.layout.xaxis.tickmode != "array"
+    assert fig.layout.xaxis.showticklabels is False
+    assert fig.layout.xaxis.hoverformat == "%b %d"
+
+    # month names only on a 12-month window
+    year_fig = build_figure(compute_seasonality(close, "TEST", 1, 12))
+    year_labels = [a.text for a in year_fig.layout.annotations]
+    assert "<b>Mar</b>" in year_labels
+    assert "15" not in year_labels
 
 
 def test_monthly_returns_table_shape():
@@ -139,3 +151,28 @@ def test_monthly_returns_table_shape():
     t = monthly_returns_table(close, 2011, 2020)
     assert t.shape == (10, 12)
     assert list(t.columns)[:3] == ["Jan", "Feb", "Mar"]
+
+
+def test_all_years_line_can_be_hidden():
+    from seasonality.chart import build_figure
+
+    close = synthetic_close()
+    res = compute_seasonality(close, "TEST", 7, 6, phases=["Midterm year"])
+
+    hidden = build_figure(res, show_all_years=False)
+    names = [t.name for t in hidden.data if t.name]
+    assert "All years" not in names
+    assert "Midterm year" in names
+    assert "+" in " ".join(a.text for a in hidden.layout.annotations)  # end label still drawn
+
+    shown = build_figure(res, show_all_years=True)
+    assert "All years" in [t.name for t in shown.data if t.name]
+
+
+def test_all_years_line_survives_without_a_filter():
+    """With nothing else to plot, hiding the all-years line is ignored."""
+    from seasonality.chart import build_figure
+
+    res = compute_seasonality(synthetic_close(), "TEST", 7, 6, phases=None)
+    fig = build_figure(res, show_all_years=False)
+    assert "All years" in [t.name for t in fig.data if t.name]

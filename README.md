@@ -39,6 +39,10 @@ Feb 29 is dropped so leap years line up with everything else. The plotted lines 
 | **Current year** (orange dotted) | The live year's actual path, stopping at the last real close |
 | Faint grey lines | Optional: every individual year behind the composite |
 
+Uncheck **Show all-years line** in the sidebar to chart the filtered years on their
+own (`--only-filtered` on the CLI). With no cycle filter selected the all-years
+line stays, since it would otherwise leave an empty chart.
+
 Markers: the seasonal low of the highlighted composite, US Election Day (first
 Tuesday after the first Monday in November), and a "you are here" line at today's
 date.
@@ -121,4 +125,3 @@ progress) are excluded from the composites — the live year is drawn separately
 Seasonal averages describe past tendencies with wide dispersion around them; the
 percentile band and per-year table are there to make that dispersion visible. Not
 investment advice.
-# Stocks-Seasonality-Tool

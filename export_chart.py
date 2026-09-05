@@ -38,6 +38,8 @@ def parse_args(argv=None):
     p.add_argument("--band", default="25,75", help="percentile band, or 'none'")
     p.add_argument("--median", action="store_true", help="use median instead of mean")
     p.add_argument("--no-current", action="store_true", help="hide the live-year path")
+    p.add_argument("--only-filtered", action="store_true",
+                   help="hide the all-years line and chart only the --phase years")
     p.add_argument("--no-day-ticks", action="store_true",
                    help="month names only on the x-axis (no day-of-month ticks)")
     p.add_argument("--refresh", action="store_true", help="force a fresh download")
@@ -76,6 +78,7 @@ def main(argv=None) -> int:
                   f"({min(res.stats_all.years)}–{max(res.stats_all.years)}), indexed to window start"),
         today=dt.date.today(),
         day_ticks=not a.no_day_ticks,
+        show_all_years=not a.only_filtered,
     )
 
     if a.out.lower().endswith(".png"):

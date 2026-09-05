@@ -97,6 +97,10 @@ if use_filter:
         "Include years that are", list(CYCLE_PHASES.keys()), default=["Midterm year"]
     ) or None
 
+show_all_years = st.sidebar.checkbox(
+    "Show all-years line", value=True,
+    help="Turn off to chart only the filtered years (needs a cycle filter selected).",
+)
 show_current = st.sidebar.checkbox(f"Overlay {last_year} (current path)", value=True)
 show_band = st.sidebar.checkbox("Percentile band", value=True)
 band = None
@@ -165,6 +169,7 @@ else:
 fig = chart_lib.build_figure(
     res,
     show_individual_years=show_years,
+    show_all_years=show_all_years,
     show_election_day=show_election,
     show_today=show_today,
     today=today,

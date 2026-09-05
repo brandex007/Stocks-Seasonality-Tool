@@ -46,6 +46,7 @@ def build_figure(
     title: str | None = None,
     subtitle: str | None = None,
     show_individual_years: bool = False,
+    show_all_years: bool = True,
     show_election_day: bool = True,
     show_today: bool = True,
     today: dt.date | None = None,
@@ -54,6 +55,8 @@ def build_figure(
 ) -> go.Figure:
     cal = res.calendar
     today = today or dt.date.today()
+    # hiding the all-years line only makes sense when something else is drawn
+    show_all_years = show_all_years or res.composite_filtered is None
     fig = go.Figure()
 
     if show_individual_years:
@@ -82,13 +85,14 @@ def build_figure(
             )
         )
 
-    fig.add_trace(
-        go.Scatter(
-            x=cal, y=res.composite_all, mode="lines", name="All years",
-            line=dict(color=INK, width=2.2),
-            hovertemplate="%{x|%b %d} · All years: %{y:.2f}<extra></extra>",
+    if show_all_years:
+        fig.add_trace(
+            go.Scatter(
+                x=cal, y=res.composite_all, mode="lines", name="All years",
+                line=dict(color=INK, width=2.2),
+                hovertemplate="%{x|%b %d} · All years: %{y:.2f}<extra></extra>",
+            )
         )
-    )
 
     if res.composite_filtered is not None:
         fig.add_trace(
@@ -123,17 +127,18 @@ def build_figure(
         return float(s.iloc[-1])
 
     # nudge the two end labels apart when the composites finish close together
-    ends = [res.composite_all, res.composite_filtered]
+    all_series = res.composite_all if show_all_years else None
+    ends = [all_series, res.composite_filtered]
     finals = [s.dropna().iloc[-1] for s in ends if s is not None and not s.dropna().empty]
     y_span = max(1e-9, float(res.matrix_all.max().max() - res.matrix_all.min().min()))
     crowded = len(finals) == 2 and abs(finals[0] - finals[1]) < 0.06 * y_span
     shift = 11 if crowded else 0
     if crowded:
         all_first = finals[0] >= finals[1]
-        end_label(res.composite_all, INK, shift if all_first else -shift)
+        end_label(all_series, INK, shift if all_first else -shift)
         end_label(res.composite_filtered, ACCENT, -shift if all_first else shift)
     else:
-        end_label(res.composite_all, INK)
+        end_label(all_series, INK)
         end_label(res.composite_filtered, ACCENT)
 
     highlight = res.composite_filtered if res.composite_filtered is not None else res.composite_all
@@ -231,43 +236,47 @@ def _day_ticks_for(cal: pd.DatetimeIndex) -> list[int] | None:
 
 
 def _apply_month_axis(fig: go.Figure, cal: pd.DatetimeIndex, day_ticks: bool = True) -> None:
-    """Two-tier x-axis: day-of-month ticks with month names on a row beneath.
+    """Two-tier x-axis: day-of-month numbers with month names on a row beneath.
 
-    Month names sit under the axis as paper-referenced annotations, centred on
-    each month, so they stay readable whatever the tick density.
+    Both rows are drawn as annotations pinned to the bottom of the plot area with
+    pixel offsets, and the axis itself keeps its native date ticks turned off.
+    Using annotations rather than ``tickmode="array"`` matters: array ticks make
+    plotly's unified hover label lose the date and print "undefined", and paper
+    fractions drift with figure height, which clipped the month row.
     """
     spans = month_spans(cal)
     days = _day_ticks_for(cal) if day_ticks else None
 
+    # native tick labels off — the two annotation rows below replace them
+    fig.update_xaxes(tickmode="auto", showticklabels=False, ticks="", ticklen=0)
+
     if days:
-        tickvals, ticktext = [], []
         for first, last, _ in spans:
+            month_start = pd.Timestamp(year=first.year, month=first.month, day=1)
             for day in days:
-                d = pd.Timestamp(year=first.year, month=first.month, day=1) + pd.Timedelta(days=day - 1)
+                d = month_start + pd.Timedelta(days=day - 1)
                 if d.month == first.month and first <= d <= last:
-                    tickvals.append(d)
-                    ticktext.append(str(day))
-        fig.update_xaxes(
-            tickmode="array", tickvals=tickvals, ticktext=ticktext, tickangle=0,
-            tickfont=dict(size=10, color=MUTED), ticklen=4,
-        )
-        month_row_y, bottom_margin = -0.11, 62
+                    fig.add_annotation(
+                        x=d, y=0, xref="x", yref="paper", yanchor="top", yshift=-7,
+                        text=str(day), showarrow=False,
+                        font=dict(size=10, color=MUTED),
+                    )
+        month_yshift, bottom_margin = -26, 66
     else:
-        fig.update_xaxes(tickmode="array", tickvals=[], ticktext=[], ticklen=0)
-        month_row_y, bottom_margin = -0.04, 44
+        month_yshift, bottom_margin = -7, 44
+
+    for _, _, mid in spans:
+        fig.add_annotation(
+            x=mid, y=0, xref="x", yref="paper", yanchor="top", yshift=month_yshift,
+            text=f"<b>{mid.strftime('%b')}</b>", showarrow=False,
+            font=dict(size=12, color=INK),
+        )
 
     # a light separator between months
     for first, _, _ in spans[1:]:
         fig.add_shape(
             type="line", xref="x", yref="paper", x0=first, x1=first, y0=0, y1=1,
             line=dict(color="#F1F4F8", width=1), layer="below",
-        )
-
-    for _, _, mid in spans:
-        fig.add_annotation(
-            x=mid, y=month_row_y, xref="x", yref="paper", yanchor="top",
-            text=f"<b>{mid.strftime('%b')}</b>", showarrow=False,
-            font=dict(size=12, color=INK),
         )
 
     fig.update_layout(margin=dict(b=bottom_margin))

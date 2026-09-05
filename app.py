@@ -104,9 +104,16 @@ show_all_years = st.sidebar.checkbox(
 show_current = st.sidebar.checkbox(f"Overlay {last_year} (current path)", value=True)
 show_band = st.sidebar.checkbox("Percentile band", value=True)
 band = None
+band_source = "auto"
 if show_band:
     lo, hi = st.sidebar.slider("Band percentiles", 5, 95, (25, 75), step=5)
     band = (float(lo), float(hi))
+    if phases:
+        band_source = st.sidebar.radio(
+            "Band covers", ["filtered", "all"], horizontal=True, index=0,
+            format_func=lambda s: "Filtered years" if s == "filtered" else "All years",
+            help="Which set of years the percentile band is measured across.",
+        )
 show_years = st.sidebar.checkbox("Show individual years (faint)", value=False)
 show_election = st.sidebar.checkbox("Mark US Election Day", value=True)
 show_today = st.sidebar.checkbox("Mark 'you are here'", value=True)
@@ -126,6 +133,7 @@ try:
         phases=phases,
         aggregation=aggregation,
         band=band,
+        band_source=band_source,
         current_year=last_year if show_current else None,
     )
 except ValueError as exc:

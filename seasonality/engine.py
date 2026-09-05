@@ -183,6 +183,7 @@ class SeasonalResult:
     band_low: pd.Series | None = None
     band_high: pd.Series | None = None
     band_labels: tuple[float, float] | None = None
+    band_source_name: str = ""
     current_year: int | None = None
     current_path: pd.Series | None = None
     filter_name: str = ""
@@ -258,6 +259,8 @@ def compute_seasonality(
     phases=None,
     aggregation: str = "mean",
     band: tuple[float, float] | None = (25.0, 75.0),
+    band_source: str = "auto",
+    band_min_years: int = 5,
     current_year: int | None = None,
     min_coverage: float = 0.9,
 ) -> SeasonalResult:
@@ -265,6 +268,11 @@ def compute_seasonality(
 
     ``phases`` selects the election-cycle subset drawn as the second line
     (e.g. ``["Midterm year"]``). ``current_year`` adds the live partial path.
+
+    ``band_source`` picks which set of years the percentile band describes:
+    ``"filtered"``, ``"all"``, or ``"auto"`` (the filtered set when there is one).
+    A band drawn from a handful of years is just those years' spread, so it is
+    skipped — with a note — when the source has fewer than ``band_min_years``.
     """
     close = close.dropna().sort_index()
     if close.empty:
@@ -304,11 +312,27 @@ def compute_seasonality(
             stats_f = _group_stats(filter_name, matrix_f, composite_f, cal)
 
     band_low = band_high = None
+    band_source_name = ""
     if band:
         lo_q, hi_q = band
-        source = matrix_f if matrix_f is not None else matrix_all
-        band_low = source.quantile(lo_q / 100.0, axis=1)
-        band_high = source.quantile(hi_q / 100.0, axis=1)
+        want_filtered = band_source in ("filtered", "auto") and matrix_f is not None
+        source = matrix_f if want_filtered else matrix_all
+        source_name = filter_name if want_filtered else "all years"
+        n_source = int(source.shape[1])
+        if n_source < band_min_years:
+            notes.append(
+                f"Percentile band hidden: only {n_source} "
+                f"{source_name.lower()}{'' if n_source == 1 else 's'} in range, and a band "
+                f"drawn from fewer than {band_min_years} is just those years' spread."
+            )
+        else:
+            band_low = source.quantile(lo_q / 100.0, axis=1)
+            band_high = source.quantile(hi_q / 100.0, axis=1)
+            band_source_name = source_name
+            # a row backed by one or two years is a line, not a distribution
+            thin = source.notna().sum(axis=1) < band_min_years
+            band_low[thin] = np.nan
+            band_high[thin] = np.nan
 
     current_path = None
     if current_year is not None:
@@ -341,7 +365,8 @@ def compute_seasonality(
         stats_filtered=stats_f,
         band_low=band_low,
         band_high=band_high,
-        band_labels=band if band else None,
+        band_labels=band if band_low is not None else None,
+        band_source_name=band_source_name,
         current_year=current_year if current_path is not None else None,
         current_path=current_path,
         filter_name=filter_name,

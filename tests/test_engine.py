@@ -198,3 +198,34 @@ def test_y_axis_has_no_rotated_title():
     fig = build_figure(compute_seasonality(synthetic_close(), "TEST", 7, 6))
     assert not fig.layout.yaxis.title.text
     assert fig.layout.yaxis.automargin is True
+
+
+def test_band_is_skipped_when_too_few_years():
+    """A 25-75 band over two years is just those two years, and it hugged the
+    composite so tightly it read as a rendering artefact."""
+    close = synthetic_close("2015-01-01", "2025-12-31")
+    res = compute_seasonality(close, "TEST", 7, 6, phases=["Midterm year"],
+                              band=(25.0, 75.0))
+    assert res.stats_filtered.n_years < 5          # 2018, 2022 only
+    assert res.band_low is None and res.band_high is None
+    assert res.band_labels is None
+    assert any("Percentile band hidden" in n for n in res.notes)
+
+    # the same request against all years has enough history to be meaningful
+    wide = compute_seasonality(close, "TEST", 7, 6, phases=["Midterm year"],
+                               band=(25.0, 75.0), band_source="all")
+    assert wide.band_low is not None
+    assert wide.band_source_name == "all years"
+    assert (wide.band_high.dropna() >= wide.band_low.dropna()).all()
+
+
+def test_band_source_follows_the_filter_by_default():
+    close = synthetic_close("1960-01-01", "2025-12-31")
+    res = compute_seasonality(close, "TEST", 7, 6, phases=["Midterm year"],
+                              band=(25.0, 75.0))
+    assert res.band_source_name == "Midterm year"
+    assert res.stats_filtered.n_years >= 5
+
+    from seasonality.chart import build_figure
+    names = [t.name for t in build_figure(res).data if t.name]
+    assert any("midterm year" in n for n in names)  # legend says what it covers

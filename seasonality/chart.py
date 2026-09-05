@@ -19,7 +19,8 @@ import plotly.graph_objects as go
 
 INK = "#111827"      # all-years composite
 ACCENT = "#2E86DE"   # filtered composite (e.g. midterm years)
-BAND = "rgba(46,134,222,0.13)"
+BAND = "rgba(46,134,222,0.13)"        # band around the filtered composite
+BAND_NEUTRAL = "rgba(120,132,150,0.14)"  # band around the all-years composite
 CURRENT = "#E8833A"  # live-year path
 GRID = "#E8ECF1"
 MUTED = "#8A94A6"
@@ -73,6 +74,10 @@ def build_figure(
 
     if res.band_low is not None and res.band_high is not None:
         lo_l, hi_l = res.band_labels or (25.0, 75.0)
+        # colour and label the band after the years it actually describes
+        from_filtered = bool(res.filter_name) and res.band_source_name == res.filter_name
+        fill = BAND if from_filtered else BAND_NEUTRAL
+        source = res.band_source_name or ("all years" if not from_filtered else res.filter_name)
         fig.add_trace(
             go.Scatter(x=cal, y=res.band_high, mode="lines", line=dict(width=0),
                        hoverinfo="skip", showlegend=False)
@@ -80,8 +85,8 @@ def build_figure(
         fig.add_trace(
             go.Scatter(
                 x=cal, y=res.band_low, mode="lines", line=dict(width=0), fill="tonexty",
-                fillcolor=BAND, hoverinfo="skip",
-                name=f"{lo_l:g}–{hi_l:g}th percentile",
+                fillcolor=fill, hoverinfo="skip",
+                name=f"{lo_l:g}–{hi_l:g}th pct · {source.lower()}",
             )
         )
 

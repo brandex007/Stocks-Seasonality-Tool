@@ -8,3 +8,4 @@ data/cache/
 .streamlit/secrets.toml
 data/custom/*
 !data/custom/README.md
+!data/custom/SOURCES.md

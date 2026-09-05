@@ -43,6 +43,8 @@ def parse_args(argv=None):
     p.add_argument("--no-day-ticks", action="store_true",
                    help="month names only on the x-axis (no day-of-month ticks)")
     p.add_argument("--refresh", action="store_true", help="force a fresh download")
+    p.add_argument("--source", default="auto", choices=list(data_lib.SOURCES),
+                   help="price source; auto keeps whichever starts earlier")
     p.add_argument("-o", "--out", default="seasonality.html", help=".html or .png")
     return p.parse_args(argv)
 
@@ -59,7 +61,7 @@ def main(argv=None) -> int:
 
     band = None if a.band.lower() == "none" else tuple(float(x) for x in a.band.split(","))
 
-    hist = data_lib.load_history(a.ticker, force_refresh=a.refresh)
+    hist = data_lib.load_history(a.ticker, force_refresh=a.refresh, source=a.source)
     close = hist["close"]
     last_year = int(close.index[-1].year)
 
@@ -86,7 +88,8 @@ def main(argv=None) -> int:
     else:
         fig.write_html(a.out, include_plotlyjs="cdn")
 
-    print(f"{name} ({a.ticker}) · {res.window_name}")
+    print(f"{name} ({a.ticker}) · {res.window_name} · {data_lib.source_label(hist)}")
+    print(f"  history     {close.index[0]:%Y-%m-%d} → {close.index[-1]:%Y-%m-%d}")
     print(f"  all years   n={res.stats_all.n_years:3d}  avg {res.stats_all.avg_return_pct:+.2f}%"
           f"  positive {res.stats_all.pct_positive:.0f}%")
     if res.stats_filtered is not None:

@@ -54,6 +54,7 @@ full year). Turn the day ticks off in the sidebar for month names only.
 ## Controls
 
 - **Asset** — preset lists by category, or type any Yahoo ticker (`NVDA`, `BTC-USD`, `CL=F`, `^N225`).
+- **Data source** — `Auto` (default), `Yahoo` or `Stooq`. Auto keeps whichever series starts earlier, which is what gets commodities their pre-2000 history. The sidebar shows the source, symbol and coverage actually in use.
 - **Window** — presets (Full year, H1, H2, Q1–Q4) or a custom start month + 3/6/12-month length. Windows may wrap the year end (e.g. Nov–Jan).
 - **Years** — restrict the sample, e.g. post-1950 only.
 - **Election-cycle filter** — midterm / election / post-election / pre-election years. Midterm = year mod 4 == 2 (2018, 2022, 2026…).
@@ -106,7 +107,7 @@ seasonality/
   data.py               yfinance download + local parquet cache (data/cache/)
   engine.py             window slicing, indexing, alignment, cycle filters, stats
   chart.py              Plotly figure builder
-tests/test_engine.py    engine unit tests  (python -m pytest tests -q)
+tests/                  unit tests, no network  (python -m pytest tests -q)
 ```
 
 ## Hosting
@@ -117,10 +118,24 @@ via the included `Dockerfile`.
 
 ## Data & caveats
 
-Prices are split/dividend adjusted daily closes from Yahoo Finance, cached under
-`data/cache/`. If a download fails the app falls back to the cached copy. Years
-that don't cover the window (a listing that starts mid-window, or the year in
-progress) are excluded from the composites — the live year is drawn separately.
+Prices are daily closes cached under `data/cache/`, one file per source. If a
+download fails the app falls back to the cached copy. Years that don't cover the
+window (a listing that starts mid-window, or the year in progress) are excluded
+from the composites — the live year is drawn separately.
+
+**Two sources.** Yahoo Finance covers everything and is split/dividend adjusted,
+but its continuous futures series are short: `GC=F` starts in 2000, and so does
+every other `=F` ticker, which leaves five or six midterm years to average.
+Stooq's free daily CSVs reach much further back for commodities and indices, so
+`Auto` fetches both for the symbols in `STOOQ_MAP` (every commodity in the preset
+list, plus the major indices and FX pairs) and keeps whichever starts earlier.
+
+A Stooq series is not always the same instrument as its Yahoo counterpart — gold
+maps to spot `xauusd` rather than the front COMEX contract, for example. For
+seasonality that difference is immaterial, but the sidebar always names the source
+and symbol on screen so you know what you're looking at. Stooq rate-limits
+aggressive use; a failed probe is remembered for ten minutes rather than retried
+on every rerun, and Auto quietly falls back to Yahoo.
 
 Seasonal averages describe past tendencies with wide dispersion around them; the
 percentile band and per-year table are there to make that dispersion visible. Not

@@ -29,8 +29,8 @@ MUTED = chart_lib.MUTED
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 6)
-def get_history(ticker: str, nonce: int = 0) -> pd.DataFrame:
-    return data_lib.load_history(ticker, force_refresh=bool(nonce))
+def get_history(ticker: str, source: str = "auto", nonce: int = 0) -> pd.DataFrame:
+    return data_lib.load_history(ticker, force_refresh=bool(nonce), source=source)
 
 
 # ------------------------------------------------------------------------ sidebar
@@ -46,6 +46,16 @@ custom = st.sidebar.text_input(
     "…or type any Yahoo ticker", value="", placeholder="e.g. NVDA, BTC-USD, CL=F"
 ).strip()
 ticker = custom.upper() if custom else preset_ticker
+
+source = st.sidebar.radio(
+    "Data source", list(data_lib.SOURCES), horizontal=True, index=0,
+    format_func=lambda s: {"auto": "Auto", "yahoo": "Yahoo", "stooq": "Stooq"}[s],
+    help=(
+        "Auto keeps whichever source starts earlier. Yahoo's continuous futures "
+        "series all begin around 2000; Stooq reaches decades further back for "
+        "commodities and indices."
+    ),
+)
 
 refresh = st.sidebar.button("↻ Refresh price data", width="stretch")
 if refresh:
@@ -71,7 +81,7 @@ else:
 
 try:
     with st.spinner(f"Loading {ticker}…"):
-        hist = get_history(ticker, nonce=1 if refresh else 0)
+        hist = get_history(ticker, source, nonce=1 if refresh else 0)
 except data_lib.DataError as exc:
     st.error(str(exc))
     st.stop()
@@ -79,6 +89,11 @@ except data_lib.DataError as exc:
 close = hist["close"]
 first_year, last_year = int(close.index[0].year), int(close.index[-1].year)
 today = dt.date.today()
+
+st.sidebar.caption(
+    f"{data_lib.source_label(hist)}  \n"
+    f"{close.index[0]:%Y-%m-%d} → {close.index[-1]:%Y-%m-%d} · {len(close):,} days"
+)
 
 st.sidebar.subheader("Years")
 yr_start, yr_end = st.sidebar.slider(
@@ -268,7 +283,7 @@ with tab_export:
     st.dataframe(curves.tail(15), width="stretch")
 
 st.caption(
-    "Prices from Yahoo Finance (split/dividend adjusted), cached locally under data/cache. "
+    f"Prices from {data_lib.source_label(hist)}, cached locally under data/cache. "
     "Each year is indexed to 100 on the first trading day of the window, then averaged across "
     "years on a calendar-day grid. Past seasonality is a statistical tendency, not a forecast."
 )

@@ -229,8 +229,30 @@ def build_figure(
     fig.update_yaxes(
         showgrid=True, gridcolor=GRID, zeroline=False, title_text=None,
         automargin=True, tickfont=dict(size=11, color=MUTED),
+        range=_y_range(res, show_individual_years, show_all_years),
     )
     return fig
+
+
+def _y_range(res, show_individual_years: bool, show_all_years: bool) -> list[float]:
+    """Explicit y-range covering every plotted series, with headroom.
+
+    Autorange leaves the live-year path clipped at the top in some renderers,
+    and the legend sits inside the plot area, so the extremes are computed here
+    and given room: more above, where the legend is, than below.
+    """
+    series = [res.composite_filtered, res.band_low, res.band_high, res.current_path]
+    if show_all_years:
+        series.append(res.composite_all)
+    if show_individual_years:
+        src = res.matrix_filtered if res.matrix_filtered is not None else res.matrix_all
+        series.extend(src[c] for c in src.columns)
+
+    values = pd.concat([s.dropna() for s in series if s is not None and not s.dropna().empty])
+    lo, hi = float(values.min()), float(values.max())
+    lo, hi = min(lo, 100.0), max(hi, 100.0)          # the 100 baseline is always drawn
+    span = max(hi - lo, 1e-6)
+    return [lo - 0.06 * span, hi + 0.15 * span]      # headroom for the legend
 
 
 def month_spans(cal: pd.DatetimeIndex) -> list[tuple[pd.Timestamp, pd.Timestamp, pd.Timestamp]]:

@@ -251,3 +251,34 @@ def test_today_and_election_markers_name_their_date():
     assert cal[slot].month == 9
     sept = [i for i, d in enumerate(cal) if d.month == 9]
     assert sept[0] <= slot <= sept[-1]
+
+
+def test_y_range_covers_every_plotted_series():
+    """The live-year path can tower over the composites; autorange was leaving
+    it clipped at the top edge."""
+    from seasonality.chart import build_figure
+
+    res = compute_seasonality(
+        synthetic_close(end="2026-09-04"), "TEST", 1, 12,
+        phases=["Midterm year"], band=(25.0, 75.0), current_year=2026,
+    )
+    res.current_path = res.current_path * 1.35        # a runaway year
+    lo, hi = build_figure(res).layout.yaxis.range
+
+    for series in (res.composite_all, res.composite_filtered,
+                   res.band_low, res.band_high, res.current_path):
+        s = series.dropna()
+        assert hi > s.max(), "series clipped at the top"
+        assert lo < s.min(), "series clipped at the bottom"
+    assert lo < 100 < hi                              # the baseline is in view
+    # more room above than below, because the legend sits inside the plot
+    assert hi - res.current_path.max() > res.band_low.min() - lo
+
+
+def test_y_range_includes_faint_year_lines_when_shown():
+    from seasonality.chart import build_figure
+
+    res = compute_seasonality(synthetic_close(), "TEST", 1, 12, phases=["Midterm year"])
+    lo, hi = build_figure(res, show_individual_years=True).layout.yaxis.range
+    assert hi > res.matrix_filtered.max().max()
+    assert lo < res.matrix_filtered.min().min()

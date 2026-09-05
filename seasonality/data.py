@@ -38,6 +38,7 @@ from pathlib import Path
 import pandas as pd
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "cache"
+CUSTOM_DIR = Path(__file__).resolve().parent.parent / "data" / "custom"
 
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={series}"
 _UA = "Mozilla/5.0 (compatible; seasonality-explorer/1.0)"
@@ -46,8 +47,8 @@ _UA = "Mozilla/5.0 (compatible; seasonality-explorer/1.0)"
 #: Commodities are the main reason this exists: every Yahoo ``=F`` continuous
 #: contract starts around 2000. Series marked "ended" are spliced onto Yahoo.
 #: Gold and silver are absent on purpose: FRED carried the LBMA fixings
-#: (GOLDAMGBD228NLBM, SLVPRUSD) until they were discontinued *and removed* - both
-#: ids now 404 - and its remaining precious-metal series are monthly, which
+#: (GOLDAMGBD228NLBM, SLVPRUSD) until they were discontinued *and removed* — both
+#: ids now 404 — and its remaining precious-metal series are monthly, which
 #: cannot drive a daily path. See ``check_sources.py --probe``.
 FRED_MAP: dict[str, str] = {
     "CL=F": "DCOILWTICO",         # WTI spot,         1986-
@@ -62,7 +63,7 @@ FRED_MAP: dict[str, str] = {
 
 MIN_SPLICE_OVERLAP = 20  # trading days needed to ratio-match two series
 
-SOURCES = ("auto", "yahoo", "fred")
+SOURCES = ("auto", "yahoo", "fred", "custom")
 
 
 class DataError(RuntimeError):
@@ -171,6 +172,90 @@ def download(ticker: str) -> pd.DataFrame:
     if raw is None or len(raw) == 0:
         raise DataError(f"No data returned for '{ticker}'. Check the symbol.")
     return _flatten(raw, ticker)
+
+
+#: Column names accepted in a user CSV, lowercased. First match wins.
+_DATE_COLUMNS = ("date", "observation_date", "time", "day", "datetime", "timestamp")
+_PRICE_COLUMNS = ("close", "adj close", "adjusted close", "price", "value", "last",
+                  "usd", "usd (am)", "usd (pm)", "settle", "close/last")
+
+
+def custom_path(ticker: str) -> Path | None:
+    """Find a user-supplied CSV for ``ticker`` under ``data/custom/``.
+
+    Both spellings work — ``GC=F.csv`` and the filesystem-safe ``GC_F.csv`` —
+    and the match is case-insensitive, because that is what people actually type.
+    """
+    if not CUSTOM_DIR.exists():
+        return None
+    wanted = {_safe_name(ticker).lower(), ticker.strip().lower()}
+    for path in sorted(CUSTOM_DIR.iterdir()):
+        if path.suffix.lower() not in (".csv", ".tsv", ".txt"):
+            continue
+        if path.stem.lower() in wanted or _safe_name(path.stem).lower() in wanted:
+            return path
+    return None
+
+
+def read_custom_csv(path: Path) -> pd.DataFrame:
+    """Parse a user CSV into a close-only frame.
+
+    Deliberately forgiving about what a downloaded price file looks like: any of
+    the usual date and price column names, either sort order, thousands
+    separators, currency symbols, and blank rows.
+    """
+    sep = "\t" if path.suffix.lower() == ".tsv" else None
+    try:
+        raw = pd.read_csv(path, sep=sep, engine="python")
+    except Exception as exc:
+        raise DataError(f"Could not read '{path.name}': {exc}") from exc
+    if raw.empty:
+        raise DataError(f"'{path.name}' has no rows.")
+
+    raw.columns = [str(c).strip().lower() for c in raw.columns]
+    date_col = next((c for c in _DATE_COLUMNS if c in raw.columns), None)
+    price_col = next((c for c in _PRICE_COLUMNS if c in raw.columns), None)
+    if date_col is None:                       # fall back to the first column
+        date_col = raw.columns[0]
+    if price_col is None:
+        others = [c for c in raw.columns if c != date_col]
+        if not others:
+            raise DataError(f"'{path.name}' needs a date column and a price column.")
+        price_col = others[-1] if len(others) == 1 else others[0]
+
+    values = (
+        raw[price_col].astype(str)
+        .str.replace(r"[,$£€\s]", "", regex=True)
+        .replace({"": None, ".": None, "-": None, "n/a": None, "na": None})
+    )
+    out = pd.DataFrame(
+        {"close": pd.to_numeric(values, errors="coerce").to_numpy()},
+        index=pd.to_datetime(raw[date_col], errors="coerce", format="mixed"),
+    )
+    out = out[out.index.notna()].dropna().sort_index()
+    out = out[~out.index.duplicated(keep="last")]
+    if out.empty:
+        raise DataError(
+            f"'{path.name}': found no usable rows using columns "
+            f"'{date_col}' and '{price_col}'."
+        )
+    return out
+
+
+def load_custom(ticker: str) -> pd.DataFrame | None:
+    """Read the user CSV for ``ticker`` if there is one."""
+    path = custom_path(ticker)
+    return read_custom_csv(path) if path else None
+
+
+def custom_tickers() -> list[str]:
+    """Every ticker with a user CSV waiting in ``data/custom/``."""
+    if not CUSTOM_DIR.exists():
+        return []
+    return sorted(
+        p.stem for p in CUSTOM_DIR.iterdir()
+        if p.suffix.lower() in (".csv", ".tsv", ".txt")
+    )
 
 
 def parse_fred_csv(text: str, series: str) -> pd.DataFrame:
@@ -300,10 +385,11 @@ def load_history(
 ) -> pd.DataFrame:
     """Return cached daily history for ``ticker``, refreshing when stale.
 
-    ``source`` is ``"yahoo"``, ``"fred"`` or ``"auto"``. Auto asks Yahoo first
-    and, when a FRED equivalent is known, keeps whichever series starts earlier —
-    splicing the two when the FRED benchmark has since been discontinued. That is
-    how commodities get history before 2000. The source, symbol and any splice
+    ``source`` is ``"yahoo"``, ``"fred"``, ``"custom"`` or ``"auto"``. Auto takes
+    Yahoo as the current series and looks for a longer one to put in front of it:
+    a CSV you dropped in ``data/custom/`` first, then FRED. When that longer
+    series stops before today — a discontinued benchmark, or a one-off download
+    of pre-2000 history — the two are spliced. The source, symbol and any splice
     date are recorded in ``df.attrs``. Falls back to the cached copy when the
     network is unavailable.
     """
@@ -314,6 +400,15 @@ def load_history(
         raise DataError(f"Unknown source '{source}'. Use one of {SOURCES}.")
 
     series = fred_series(ticker)
+
+    if source == "custom":
+        df = load_custom(ticker)
+        if df is None:
+            raise DataError(
+                f"No CSV for '{ticker}' in {CUSTOM_DIR}. Name it "
+                f"'{_safe_name(ticker)}.csv' with a date column and a price column."
+            )
+        return _tag(df, "custom", custom_path(ticker).name)
 
     if source == "fred":
         if not series:
@@ -333,11 +428,20 @@ def load_history(
             raise y_err or DataError(f"No data for '{ticker}'.")
         return _tag(y_df, "yahoo", ticker)
 
-    # Auto only asks FRED for the mapped symbols — the commodities, rates and FX
-    # where Yahoo is short. Everything else would just cost a failed request.
-    f_df = None
+    # --- auto: find the longest history available for this ticker
     note = ""
-    if series:
+    long_df = long_name = long_kind = None
+
+    # A CSV you put there yourself is an explicit instruction, so it outranks
+    # FRED and costs no request.
+    try:
+        long_df = load_custom(ticker)
+        if long_df is not None:
+            long_kind, long_name = "custom", custom_path(ticker).name
+    except DataError as exc:
+        note = str(exc)          # a malformed CSV should say so, not vanish
+
+    if long_df is None and series:
         if _recently_failed(series):
             note = f"FRED probe for '{series}' failed recently; retrying later."
         else:
@@ -349,16 +453,18 @@ def load_history(
             if f_df is None and f_err is not None:
                 _note_failure(series)
                 note = str(f_err)
+            elif f_df is not None:
+                long_df, long_kind, long_name = f_df, "fred", series
 
     # an empty frame is no data, whatever produced it
     y_df = None if (y_df is not None and y_df.empty) else y_df
-    f_df = None if (f_df is not None and f_df.empty) else f_df
+    long_df = None if (long_df is not None and long_df.empty) else long_df
 
-    if y_df is None and f_df is None:
+    if y_df is None and long_df is None:
         raise y_err or DataError(f"No data for '{ticker}'.")
     if y_df is None:
-        return _tag(f_df, "fred", series)
-    if f_df is None:
+        return _tag(long_df, long_kind, long_name)
+    if long_df is None:
         out = _tag(y_df, "yahoo", ticker)
         if note:
             # say why the longer series isn't on screen instead of silently
@@ -366,26 +472,30 @@ def load_history(
             out.attrs["fallback_reason"] = note
         return out
 
-    earlier_by = (y_df.index[0] - f_df.index[0]).days
-    if earlier_by <= 365 or len(f_df) < 250:
-        return _tag(y_df, "yahoo", ticker)
+    earlier_by = (y_df.index[0] - long_df.index[0]).days
+    if earlier_by <= 365 or len(long_df) < 250:
+        out = _tag(y_df, "yahoo", ticker)
+        if long_kind == "custom":
+            out.attrs["fallback_reason"] = (
+                f"'{long_name}' starts {long_df.index[0]:%Y-%m-%d}, no earlier than "
+                f"Yahoo's {y_df.index[0]:%Y-%m-%d}, so it adds nothing."
+            )
+        return out
 
-    # FRED starts earlier. If it also runs to today, use it as-is; if the
-    # benchmark was discontinued, splice Yahoo onto the end.
-    stale_days = (y_df.index[-1] - f_df.index[-1]).days
-    if stale_days <= 7:
-        return _tag(f_df, "fred", series)
+    # The long series wins. If it also runs to today, use it alone; otherwise
+    # splice Yahoo onto the end so the chart reaches the current price.
+    if (y_df.index[-1] - long_df.index[-1]).days <= 7:
+        return _tag(long_df, long_kind, long_name)
 
-    combined, join = splice(f_df, y_df)
+    combined, join = splice(long_df, y_df)
     if join is None:
-        # no usable overlap: the longer series alone beats a bad join
-        out = _tag(f_df, "fred", series)
+        out = _tag(long_df, long_kind, long_name)
         out.attrs["fallback_reason"] = (
-            f"'{series}' ends {f_df.index[-1]:%Y-%m-%d} and does not overlap "
-            f"{ticker}; showing the FRED series alone."
+            f"'{long_name}' ends {long_df.index[-1]:%Y-%m-%d} and does not overlap "
+            f"{ticker}; showing it alone, so the chart stops there."
         )
         return out
-    out = _tag(combined, "fred+yahoo", f"{series} → {ticker}")
+    out = _tag(combined, f"{long_kind}+yahoo", f"{long_name} → {ticker}")
     out.attrs["spliced_at"] = join
     return out
 
@@ -397,7 +507,9 @@ def source_label(df: pd.DataFrame) -> str:
     name = {
         "yahoo": "Yahoo Finance",
         "fred": "FRED",
+        "custom": "Your CSV",
         "fred+yahoo": "FRED spliced to Yahoo",
+        "custom+yahoo": "Your CSV spliced to Yahoo",
     }.get(src, src)
     label = f"{name} · {sym}" if sym else name
     join = df.attrs.get("spliced_at")

@@ -6,3 +6,5 @@ venv/
 data/cache/
 .DS_Store
 .streamlit/secrets.toml
+data/custom/*
+!data/custom/README.md

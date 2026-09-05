@@ -204,3 +204,129 @@ def test_source_label():
     df = pd.DataFrame({"close": [1.0]}, index=pd.to_datetime(["2020-01-01"]))
     df.attrs.update(source="fred", symbol="DCOILWTICO")
     assert data_lib.source_label(df) == "FRED · DCOILWTICO"
+
+
+# --------------------------------------------------------------- custom CSVs
+
+CUSTOM_CSV = """Date,USD (AM)
+1968-04-01,"1,038.00"
+1968-04-02,1040.50
+1968-04-03,
+1968-04-04,1041.25
+"""
+
+CUSTOM_CSV_DESCENDING = """Close/Last,Time
+41.25,2020-01-03
+40.50,2020-01-02
+38.00,2020-01-01
+"""
+
+
+def _write_custom(tmp_path, name, text):
+    d = tmp_path / "custom"
+    d.mkdir(exist_ok=True)
+    (d / name).write_text(text)
+    return d
+
+
+def test_custom_csv_reader_is_forgiving(tmp_path, monkeypatch):
+    """Downloaded price files come in every shape; the reader takes them."""
+    d = _write_custom(tmp_path, "GC_F.csv", CUSTOM_CSV)
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
+
+    df = data_lib.load_custom("GC=F")
+    assert list(df.columns) == ["close"]
+    assert len(df) == 3                                    # the blank row is dropped
+    assert df["close"].iloc[0] == pytest.approx(1038.0)    # thousands separator
+    assert df.index[0] == pd.Timestamp("1968-04-01")
+
+
+def test_custom_csv_handles_reversed_columns_and_order(tmp_path, monkeypatch):
+    d = _write_custom(tmp_path, "SI_F.csv", CUSTOM_CSV_DESCENDING)
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
+
+    df = data_lib.load_custom("SI=F")
+    assert df.index.is_monotonic_increasing
+    assert df["close"].iloc[0] == pytest.approx(38.0)
+
+
+def test_custom_file_is_found_by_either_spelling(tmp_path, monkeypatch):
+    d = _write_custom(tmp_path, "gc=f.CSV", CUSTOM_CSV)
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
+    assert data_lib.custom_path("GC=F") is not None
+    assert data_lib.custom_tickers() == ["gc=f"]
+
+
+def test_missing_custom_dir_is_not_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", tmp_path / "nope")
+    assert data_lib.load_custom("GC=F") is None
+    assert data_lib.custom_tickers() == []
+
+
+def test_auto_splices_a_custom_csv_onto_yahoo(tmp_path, monkeypatch):
+    """The whole point: pre-2000 gold in front of Yahoo's live series."""
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path / "cache")
+    data_lib.reset_failures()
+    old_idx = pd.bdate_range("1968-04-01", "2001-12-31")
+    text = "Date,Price\n" + "\n".join(
+        f"{d:%Y-%m-%d},100.0" for d in old_idx
+    )
+    d = _write_custom(tmp_path, "GC_F.csv", text)
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
+    yahoo = _series("2000-08-30", 6500, 150.0)
+    monkeypatch.setattr(data_lib, "download", lambda t: yahoo)
+
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "custom+yahoo"
+    assert df.index[0] == pd.Timestamp("1968-04-01")
+    assert df.index[-1] == yahoo.index[-1]
+    assert df.attrs["spliced_at"] is not None
+    # the old level is lifted onto Yahoo's, so the join isn't a cliff
+    assert df["close"].iloc[0] == pytest.approx(150.0)
+    assert "Your CSV" in data_lib.source_label(df)
+
+
+def test_custom_csv_outranks_fred(tmp_path, monkeypatch):
+    """A file you put there yourself is an explicit instruction."""
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path / "cache")
+    data_lib.reset_failures()
+    idx = pd.bdate_range("1970-01-01", "2001-12-31")
+    d = _write_custom(tmp_path, "CL_F.csv",
+                      "Date,Close\n" + "\n".join(f"{x:%Y-%m-%d},50.0" for x in idx))
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-01-01", 6000, 75.0))
+    called = []
+    monkeypatch.setattr(data_lib, "download_fred",
+                        lambda s, **kw: called.append(s) or _series("1986-01-02", 9000, 60.0))
+
+    df = data_lib.load_history("CL=F", source="auto")
+    assert df.attrs["source"] == "custom+yahoo"
+    assert called == []                       # no request needed at all
+    assert df.index[0].year == 1970
+
+
+def test_a_useless_custom_csv_says_so(tmp_path, monkeypatch):
+    """A file that starts no earlier than Yahoo shouldn't silently do nothing."""
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path / "cache")
+    data_lib.reset_failures()
+    idx = pd.bdate_range("2015-01-01", "2016-12-31")
+    d = _write_custom(tmp_path, "GC_F.csv",
+                      "Date,Close\n" + "\n".join(f"{x:%Y-%m-%d},100.0" for x in idx))
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-08-30", 6500, 150.0))
+
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "yahoo"
+    assert "adds nothing" in df.attrs["fallback_reason"]
+
+
+def test_a_broken_custom_csv_is_reported_not_swallowed(tmp_path, monkeypatch):
+    monkeypatch.setattr(data_lib, "CACHE_DIR", tmp_path / "cache")
+    data_lib.reset_failures()
+    d = _write_custom(tmp_path, "GC_F.csv", "nonsense\nrows,without,dates\n")
+    monkeypatch.setattr(data_lib, "CUSTOM_DIR", d)
+    monkeypatch.setattr(data_lib, "download", lambda t: _series("2000-08-30", 500, 150.0))
+
+    df = data_lib.load_history("GC=F", source="auto")
+    assert df.attrs["source"] == "yahoo"
+    assert "GC_F.csv" in df.attrs["fallback_reason"]
